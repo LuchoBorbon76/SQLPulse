@@ -478,7 +478,7 @@ tr.clickable:hover td:first-child{border-left:3px solid var(--cp-accent);padding
       </div>
       <div class="card"><h2>Databases</h2><div class="card-sub">Size, state, and backup age</div>
         <div class="scroll compact"><table><thead><tr>
-          <th>Name</th><th>State</th><th>Recovery</th><th class="num">Compat</th><th class="num">Data MB</th><th class="num">Log MB</th><th class="ctr">Last Full</th><th class="ctr">Query Store</th>
+          <th>Name</th><th>State</th><th>Recovery</th><th>Comp. Level</th><th class="num">Data MB</th><th class="num">Log MB</th><th class="ctr">Last Full</th><th class="ctr">Query Store</th>
         </tr></thead><tbody id="databases"></tbody></table></div>
       </div>
     </div>
@@ -760,6 +760,10 @@ function stateFor(id){
 const el = (id) => document.getElementById(id);
 const fmtN = (n)=> n==null?"-":Number(n).toLocaleString(undefined,{maximumFractionDigits:1});
 const fmtInt = (n)=> n==null?"-":Number(n).toLocaleString();
+const compatLabel = (c)=>{
+  const map = {80:'SQL Server 2000',90:'SQL Server 2005',100:'SQL Server 2008',110:'SQL Server 2012',120:'SQL Server 2014',130:'SQL Server 2016',140:'SQL Server 2017',150:'SQL Server 2019',160:'SQL Server 2022',170:'SQL Server 2025'};
+  return c==null?'-':(map[Number(c)] || 'Compat '+c);
+};
 const fmtDate = (s)=> !s?"never":new Date(s).toLocaleString(undefined,{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"});
 const ago = (s)=> {
   if(!s) return "never";
@@ -2169,7 +2173,7 @@ function render(DATA, PREV){
         <td><b>${esc(d.name)}</b></td>
         <td><span class="dbstate-${esc(d.state)}">${esc(d.state)}</span></td>
         <td class="mono">${esc(d.recovery)}</td>
-        <td class="num mono">${esc(d.compat ?? '-')}</td>
+        <td title="Compatibility level ${esc(d.compat ?? '?')}">${compatLabel(d.compat)}</td>
         <td class="num">${fmtN(d.data_mb)}</td>
         <td class="num">${fmtN(d.log_mb)}</td>
         <td class="ctr">${['tempdb','model','master','msdb'].includes(d.name)?'<span class="pill muted">system</span>':backupPill}</td>

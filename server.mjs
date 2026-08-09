@@ -330,7 +330,7 @@ SELECT
      (SELECT COUNT(*) FROM sys.dm_exec_requests WHERE blocking_session_id <> 0) AS blocked_requests
    FOR JSON PATH, WITHOUT_ARRAY_WRAPPER)) AS instance,
   JSON_QUERY((SELECT DB_NAME() AS name, 'ONLINE' AS state, 'FULL' AS recovery,
-     CAST(DATABASEPROPERTYEX(DB_NAME(),'Version') AS INT) AS compat,
+     (SELECT compatibility_level FROM sys.databases WHERE database_id = DB_ID()) AS compat,
      CAST(SUM(CASE WHEN type=0 THEN size END)*8.0/1024 AS DECIMAL(18,1)) AS data_mb,
      CAST(SUM(CASE WHEN type=1 THEN size END)*8.0/1024 AS DECIMAL(18,1)) AS log_mb,
      NULL AS last_full_backup, NULL AS last_log_backup,

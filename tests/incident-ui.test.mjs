@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { diagnosticsRequest } from '../diagnostics-ui.js';
+import { diagnosticsRequest, incidentLabel, incidentExplanation } from '../diagnostics-ui.js';
 
 test('diagnostics API requests use same-origin credentials and JSON POST only when explicitly writing', async () => {
   const calls = [];
@@ -14,6 +14,31 @@ test('diagnostics API requests use same-origin credentials and JSON POST only wh
   assert.equal(calls[0][1].method, undefined);
   assert.equal(calls[1][1].method, 'POST');
   assert.deepEqual(JSON.parse(calls[1][1].body), { enabled: true, blocking: true });
+});
+
+test('incident presentation uses plain-language titles and explicitly distinguishes recorded evidence from a live diagnosis', () => {
+  assert.equal(incidentLabel('blocking'), 'Blocking chain');
+  assert.equal(incidentLabel('query-regression'), 'Query slowdown');
+  assert.equal(incidentLabel('unknown'), 'Recorded incident');
+  assert.match(incidentExplanation('blocking'), /recorded snapshot, not the current/);
+  assert.match(incidentExplanation('query-regression'), /does not prove a root cause/);
+  assert.match(incidentExplanation('query-summary'), /not actual execution plans/);
+});
+
+test('dialog has fixed chrome and separate timeline/settings views instead of an outer scroll container', async () => {
+  const source = await readFile(new URL('../diagnostics-ui.js', import.meta.url), 'utf8');
+  const css = await readFile(new URL('../diagnostics-ui.css', import.meta.url), 'utf8');
+  assert.match(source, /aria-label="Incident evidence views"/);
+  assert.match(source, /id="diagnostics-settings-panel"[^>]*hidden/);
+  assert.match(source, /selectView\('timeline'\)/);
+  assert.match(source, /data-action="settings-tab"/);
+  assert.match(source, /What to capture/);
+  assert.match(source, /Sensitive details/);
+  assert.match(source, /Recorded fields \(technical details\)/);
+  assert.match(source, /No recorded incidents/);
+  assert.match(css, /\.diagnostics-dialog\{[^}]*overflow:hidden/);
+  assert.match(css, /\.diagnostics-dialog\[open\]\{display:flex;flex-direction:column/);
+  assert.match(css, /#diagnostics-timeline,#diagnostics-detail\{overflow:auto;min-height:0/);
 });
 
 test('diagnostics API reports malformed/error responses and bounds requests even if fetch ignores AbortSignal', async () => {

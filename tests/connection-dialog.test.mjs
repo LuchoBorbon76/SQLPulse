@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import { classifySqlEndpoint } from '../sql-endpoint.js';
+import { normalizeMicrosoftBrowserUrl, normalizeMicrosoftDeviceUri } from '../microsoft-device-signin.js';
 
 const html = await readFile(new URL('../index.html', import.meta.url), 'utf8');
 
@@ -82,6 +83,61 @@ test('sign-in tab is requested from the click before waiting for authentication 
   assert.ok(html.includes('href="https://login.microsoft.com/device"'));
   assert.ok(html.includes("window.open('about:blank', '_blank')"));
   assert.ok(html.includes("connectionBrowser.opener = null"));
+});
+
+test('a reused session closes the waiting tab before SQL while a required sign-in navigates it', () => {
+  const f = fixture();
+  const tab = {
+    document: { body: {} }, closed: false, focus() {},
+    close() { this.closed = true; },
+    location: { replace(url) { tab.url = url; } },
+  };
+  Object.assign(f.context, {
+    window: { open: () => tab }, connectionBrowser: null,
+    normalizeMicrosoftBrowserUrl, normalizeMicrosoftDeviceUri,
+  });
+  vm.runInNewContext([
+    section('function openSqlSignInTab()', "el('sql-signin-copy').addEventListener"),
+    section('function finishSqlSignInTab()', 'function openModal(existing)'),
+  ].join('\n'), f.context);
+  f.el('f-auth').value = 'azuread-interactive';
+  f.context.openSqlSignInTab();
+  f.context.showConnectionProgress({ state: 'running', phase: 'checking-account', message: 'Verifying account' });
+  assert.equal(tab.closed, false);
+  f.context.showConnectionProgress({ state: 'running', phase: 'connecting', message: 'Connecting to SQL.' });
+  assert.equal(tab.closed, true);
+  assert.match(f.el('connection-status').textContent, /no new sign-in was needed/);
+  assert.equal(f.context.connectionBrowser, null);
+  tab.closed = false;
+  f.context.openSqlSignInTab();
+  const url = 'https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize?' +
+    new URLSearchParams({ response_type: 'code', client_id: '04b07795-8ddb-461a-bbee-02f9e1bf7b46',
+      redirect_uri: 'http://localhost:8766/' });
+  f.context.showConnectionProgress({ state: 'running', phase: 'sign-in', signInUrl: url });
+  assert.equal(tab.closed, false);
+  assert.equal(tab.url, normalizeMicrosoftBrowserUrl(url));
+  assert.equal(f.context.connectionBrowser, null);
+});
+
+test('Sign in again is explicit for both Test and Load and unavailable to noninteractive methods', async () => {
+  const f = fixture();
+  f.el('f-name').value = 'Synthetic MI';
+  f.el('f-server').value = 'demo.public.zone.database.windows.net,3342';
+  f.el('f-auth').value = 'azuread-interactive';
+  f.el('f-user').value = 'test@example.test';
+  f.updateAuthFields();
+  assert.equal(f.el('f-force-login-field').hidden, false);
+  await f.saveServer();
+  assert.equal(f.requests.at(-1).body.forceLogin, false);
+  f.el('f-force-login').checked = true;
+  await f.saveServer();
+  assert.equal(f.requests.at(-1).body.forceLogin, true);
+  await f.fetchDatabaseList();
+  assert.equal(f.requests.at(-1).body.forceLogin, true);
+  f.el('f-auth').value = 'azuread-integrated';
+  f.updateAuthFields();
+  assert.equal(f.el('f-force-login-field').hidden, true);
+  assert.equal(f.el('f-force-login').checked, false);
 });
 
 test('Test and Save dispatches MI without a database and includes explicit target and tenant', async () => {

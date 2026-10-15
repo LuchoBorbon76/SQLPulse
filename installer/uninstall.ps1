@@ -36,7 +36,7 @@ Write-Host "  Removed shortcuts"
 
 # Preserve config? Ask user
 $configFiles = @('servers.json', 'ai-settings.json', 'alert-settings.json', 'alert-state.json', 'microsoft-email-auth.json', '.encryption-key',
-    'monitor-settings.json', 'incident-evidence.json', 'history', 'history-series', '.sql-pulse-owner.json')
+    'monitor-settings.json', 'incident-evidence.json', 'operational-reports.json', 'history', 'history-series', '.sql-pulse-owner.json')
 if (@($configFiles | Where-Object { Test-Path (Join-Path $InstallDir $_) }).Count -gt 0) {
     $ans = Read-Host "Keep server and AI provider configuration? [Y/n]"
     if ($ans -notmatch '^n') {

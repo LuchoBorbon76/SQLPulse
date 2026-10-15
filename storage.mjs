@@ -71,11 +71,14 @@ export function createJsonStore(file, defaultFactory, validate) {
       await (queues.get(file) || Promise.resolve());
       return readCurrent();
     },
-    update(mutator) {
+    update(mutator, { skipUnchanged = false } = {}) {
       return serialize(file, async () => {
         const current = await readCurrent();
+        const before = skipUnchanged ? JSON.stringify(current) : null;
         const result = await mutator(current);
-        return save(result === undefined ? current : result);
+        const next = result === undefined ? current : result;
+        if (skipUnchanged && JSON.stringify(next) === before) return checked(next);
+        return save(next);
       });
     },
     write(value) {

@@ -59,6 +59,23 @@ async function withUi(run, { testFailure = false, unlock = true, initiallyEnable
 }
 const settle = () => new Promise(resolve => setImmediate(resolve));
 
+test('email detail opt-in defaults generic, is previewed explicitly and survives draft refresh', async () => {
+  await withUi(async ({ ui, nodes, requests }) => {
+    assert.equal(nodes.get('email-detail-level').value, 'generic');
+    assert.match(nodes.get('alert-settings-backdrop').innerHTML, /requires new approval/);
+    assert.equal(nodes.get('email-server-name').checked, false);
+    nodes.get('email-detail-level').value = 'diagnostic';
+    await ui.refresh();
+    assert.equal(nodes.get('email-detail-level').value, 'diagnostic');
+    await nodes.get('email-test').handlers.click();
+    assert.equal(requests.find(r => r.url.endsWith('/test-preview')).body.emailDetailLevel, 'diagnostic');
+    assert.equal(requests.find(r => r.url.endsWith('/test-preview')).body.includeServerName, false);
+    assert.equal(requests.filter(r => r.url.endsWith('/test')).length, 0);
+    await ui.refresh({ preserveDrafts: false });
+    assert.equal(nodes.get('email-detail-level').value, 'generic');
+  }, { initiallyEnabled: true });
+});
+
 test('onClosed runs after clearing credentials and invalidating approval', async () => {
   let calls = 0, inspect = () => {};
   await withUi(async ({ nodes, ui }) => {

@@ -36,7 +36,8 @@ export function initDiagnosticsUi({
           <label class="diagnostics-check"><input name="blocking" type="checkbox"> Record bounded blocking-chain snapshots, including sleeping roots supplied by monitoring</label>
           <label class="diagnostics-check"><input name="deadlocks" type="checkbox"> Read existing system_health deadlock events (SQL Server / Managed Instance only)</label>
           <label class="diagnostics-check"><input name="queryHistory" type="checkbox"> Read Query Store history and compare execution-weighted closed windows</label>
-          <label class="diagnostics-check"><input name="includeSqlText" type="checkbox"> Retain sensitive SQL text and deadlock XML locally</label>
+          <label class="diagnostics-check"><input name="includeSqlText" type="checkbox"> Retain sensitive SQL text locally</label>
+          <label class="diagnostics-check"><input name="includeDeadlockXml" type="checkbox"> Retain sensitive deadlock XML locally (can include SQL literals)</label>
           <label class="diagnostics-check"><input name="retainPlans" type="checkbox"> Retain sensitive Query Store plan XML locally (may include SQL text regardless of the text choice)</label>
         </fieldset>
         <div class="diagnostics-grid">
@@ -70,7 +71,7 @@ export function initDiagnosticsUi({
   doc.body.appendChild(dialog);
   const find = id => dialog.querySelector(`#diagnostics-${id}`);
   const form = find('form'), filter = find('filter'), message = find('message');
-  const flags = ['enabled', 'blocking', 'deadlocks', 'queryHistory', 'includeSqlText', 'retainPlans'];
+  const flags = ['enabled', 'blocking', 'deadlocks', 'queryHistory', 'includeSqlText', 'includeDeadlockXml', 'retainPlans'];
   const numbers = ['intervalSeconds', 'retentionDays', 'maxIncidents', 'topQueries', 'topPlans',
     'windowMinutes', 'baselineMinutes', 'minExecutions', 'regressionRatio'];
   const api = (path, body) => diagnosticsRequest(fetchImpl, path, body);

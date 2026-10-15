@@ -14,6 +14,99 @@ const config = overrides => ({
 const server = { id: 'sql-1', name: 'private-label', server: 'private-host', database: 'private-db', auth: 'sqlauth' };
 const healthy = { instance: { blocked_requests: 0, uptime_min: 10, page_life_expectancy: 1000 } };
 const critical = count => ({ instance: { ...healthy.instance, blocked_requests: count } });
+
+test('diagnostic email content requires a fresh immutable approval, leaves webhooks generic, and preserves dedup/recovery', async t => {
+  const webhooks = [];
+  const { service, calls, enable, advance } = await fixture(t, {
+    sendWebhook: async request => { webhooks.push(request); return { accepted: true }; },
+  });
+  await enable();
+  await service.observe(server, critical(2));
+  assert.doesNotMatch(calls[0].text, /Observed:|Blocked requests/);
+  const candidate = config({ emailDetailLevel: 'diagnostic',
+    webhooks: [{ id: 'generic-hook', adapter: 'generic', label: 'Synthetic', url: 'https://example.com/mock-only' }] });
+  await assert.rejects(service.saveSettings(candidate), /Preview/);
+  const preview = await service.prepareSettingsPreview(candidate);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(preview.privacy, { diagnosticEvidence: true, connectionDisplayName: false, syntheticExamples: true });
+  assert.match(preview.warning, /numeric health evidence/);
+  assert.match(preview.templates.find(v => v.kind === 'critical').text, /SYNTHETIC EXAMPLE ONLY/);
+  assert.doesNotMatch(JSON.stringify(preview.webhookTemplates), /Observed:|SYNTHETIC EXAMPLE/);
+  preview.templates[0].text = 'TAMPERED-SQL';
+  await service.applySettings({ previewId: preview.previewId });
+  advance(120000);
+  await service.observe(server, { ...critical(4), instance: { ...critical(4).instance, avg_cpu_percent: 96 }, generated_at: '2026-10-14T20:02:00Z' });
+  assert.match(calls[1].text, /\[CRITICAL\] Blocked requests/);
+  assert.match(calls[1].text, /Observed: 4 requests\. Rule: > 0 requests/);
+  assert.match(calls[1].text, /Observed: 96 %\. Rule: >= 90%/);
+  assert.match(calls[1].text, /Potential impact:|Read-only next check:/);
+  assert.doesNotMatch(calls[1].text, /private-|TAMPERED|SYNTHETIC/);
+  assert.doesNotMatch(JSON.stringify(webhooks), /Observed:|Blocked requests|96 %/);
+  advance(120000);
+  assert.equal((await service.observe(server, { ...critical(8), instance: { ...critical(8).instance, avg_cpu_percent: 98 } })).skipped, 'unchanged');
+  assert.equal(calls.length, 2);
+  advance(120000);
+  await service.observe(server, { ...healthy, instance: { ...healthy.instance, avg_cpu_percent: 0 } });
+  assert.match(calls[2].text, /RECOVERY - previously reported/);
+  assert.match(calls[2].text, /Observed: 0 requests/);
+  assert.match(calls[2].text, /Observed: 0 %/);
+  assert.match(calls[2].text, /current recovery observations, not new breaches/);
+});
+
+test('missing or future diagnostic approval versions cannot disclose evidence; reapproval restores detailed mode', async t => {
+  const f = await fixture(t);
+  await f.enable(config({ emailDetailLevel: 'diagnostic' }));
+  const file = join(f.directory, 'settings.json');
+  for (const version of [undefined, 999]) {
+    const stored = JSON.parse(await readFile(file, 'utf8'));
+    if (version === undefined) delete stored.emailDetailVersion;
+    else stored.emailDetailVersion = version;
+    await writeFile(file, JSON.stringify(stored));
+    assert.equal((await f.service.settings()).emailDetailApprovalRequired, true);
+    f.advance(120000);
+    await f.service.observe({ ...server, id: `gate-${version ?? 'missing'}` }, critical(7));
+    assert.doesNotMatch(f.calls.at(-1).text, /Observed:|7 requests/);
+  }
+  await f.enable(config({ emailDetailLevel: 'diagnostic' }));
+  assert.equal((await f.service.settings()).emailDetailApprovalRequired, false);
+  await f.service.observe({ ...server, id: 'approved-version' }, critical(7));
+  assert.match(f.calls.at(-1).text, /Observed: 7 requests/);
+});
+
+test('diagnostic delivery tests send only the exact approved synthetic preview and do not enable monitoring', async t => {
+  const { service, calls } = await fixture(t);
+  const preview = await service.prepareTestPreview(config({ enabled: false, emailDetailLevel: 'diagnostic' }));
+  assert.equal(calls.length, 0);
+  const expected = { ...preview.templates[0] };
+  assert.match(expected.text, /SYNTHETIC|invented/);
+  assert.match(expected.text, /96 %/);
+  preview.templates[0].text = 'PRIVATE-QUERY';
+  await service.sendTest({ previewId: preview.previewId });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].text, expected.text);
+  assert.equal(calls[0].subject, expected.subject);
+  assert.equal((await service.settings()).enabled, false);
+  await assert.rejects(service.sendTest({ previewId: preview.previewId }), /expired|already used/);
+});
+
+test('diagnostic warnings, unavailable collection and unresolved escalations have evidence and status context', async t => {
+  const { service, calls, enable, advance } = await fixture(t);
+  await enable(config({ emailDetailLevel: 'diagnostic', policy: { escalationSeconds: 60 } }));
+  await service.observe(server, { ...healthy, instance: { ...healthy.instance, avg_cpu_percent: 82 } });
+  assert.match(calls[0].text, /\[WARNING\] SQL process CPU/);
+  assert.match(calls[0].text, /82 %\. Rule: >= 75%/);
+  advance(60000);
+  await service.observe(server, { ...healthy, generated_at: '2026-10-14T20:01:00Z', instance: { ...healthy.instance, avg_cpu_percent: 82 } });
+  assert.match(calls[1].text, /ESCALATION - previously reported incident remains unresolved/);
+  assert.match(calls[1].text, /Incident age: 60s/);
+  assert.match(calls[1].text, /Observed condition window: 60s; distinct samples 2/);
+  advance(120000);
+  await service.observe({ ...server, id: 'failed-connection' }, null, { error: new Error('SECRET select token from private-host') });
+  assert.match(calls[2].text, /Connection unavailable/);
+  assert.match(calls[2].text, /numeric evidence unavailable/);
+  assert.match(calls[2].text, /freshness cannot be established/);
+  assert.doesNotMatch(calls[2].text, /SECRET|select token|private-host/);
+});
 async function fixture(t, overrides = {}) {
   const directory = resolve('tests', `.alerts-test-${randomUUID()}`);
   await mkdir(directory, { recursive: true });

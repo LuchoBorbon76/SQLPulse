@@ -1,4 +1,6 @@
 import { classifySqlEndpoint } from './sql-endpoint.js';
+import { setTimeout as delay } from 'node:timers/promises';
+import { throwIfConnectionAborted } from './connection-progress.mjs';
 
 const connectionTypes = new Set(['auto', 'sql-server', 'azure-sqldb', 'azure-mi']);
 const authTypes = new Set(['windows', 'sqlauth', 'azuread-integrated', 'azuread-password', 'azuread-interactive']);
@@ -87,16 +89,77 @@ export function redactSqlDiagnostic(value, cfg = {}) {
     .trim();
 }
 
+export function classifySqlFailure(error, { stderr = '', stdout = '', output = '' } = {}) {
+  const text = `${stderr}\n${stdout}\n${output}`;
+  if (error?.code === 'ENOENT') return { category: 'tool', retryable: false };
+  if (error?.name === 'AbortError' || error?.code === 'ABORT_ERR') return { category: 'cancelled', retryable: false };
+  if (/AADSTS|interaction_required|please run.*az login|token.*expired/i.test(text)) return { category: 'authentication', retryable: false };
+  if (/login failed|permission.*denied|not authorized|cannot open database.*requested by the login|certificate|TLS handshake|x509/i.test(text)) {
+    return { category: 'authorization-or-configuration', retryable: false };
+  }
+  if (error?.killed || error?.code === 'ETIMEDOUT' || error?.signal === 'SIGTERM') return { category: 'timeout', retryable: false };
+  if (/\b(?:Msg|Error(?:\s+(?:Number|Code))?|Number|mssql)\s*[:=]?\s*(?:40197|40501|40613|49918|49919|49920|10928|10929)\b/i.test(text) ||
+      /service is (?:currently )?busy|database.*is not currently available|service has encountered an error processing your request/i.test(text)) {
+    return { category: 'azure-transient', retryable: true };
+  }
+  if (/ECONNRESET|ECONNREFUSED|connection (?:was )?(?:reset|refused)|forcibly closed by the remote host|unexpected EOF|read tcp.*(?:reset|closed|timeout)|dial tcp.*(?:timeout|timed out|refused)|i\/o timeout/i.test(text)) {
+    return { category: 'network-transient', retryable: true };
+  }
+  if (/ENOTFOUND|no such host|name or service not known|getaddrinfo|server was not found|network.*unreachable/i.test(text)) {
+    return { category: 'network-configuration', retryable: false };
+  }
+  return { category: 'sql', retryable: false };
+}
+
+export function sqlExecutionBudget(cfg, extraArgs, timeoutMs) {
+  const args = [...extraArgs];
+  if (!classifySqlEndpoint(cfg.server, cfg.connectionType, cfg.engineEdition).isAzure) return { args, timeoutMs };
+  const index = args.indexOf('-l'), requested = index >= 0 ? Number(args[index + 1]) : 0;
+  const login = Math.max(30, Number.isFinite(requested) ? requested : 0);
+  if (index >= 0) args[index + 1] = String(login);
+  else args.push('-l', String(login));
+  const queryIndex = args.indexOf('-t'), query = queryIndex >= 0 ? Number(args[queryIndex + 1]) : 30;
+  return { args, timeoutMs: Math.max(timeoutMs, (login + (Number.isFinite(query) ? query : 30) + 5) * 1000) };
+}
+
+const RETRYABLE_READS = new Set(['metrics', 'metrics-azure', 'inventory', 'topq', 'test', 'engine', 'dblist', 'detail', 'plan']);
+export async function runSqlReadWithRetry(cfg, tag, operation, {
+  signal, onProgress, onRetry = () => {}, wait = delay,
+} = {}) {
+  const eligible = classifySqlEndpoint(cfg.server, cfg.connectionType, cfg.engineEdition).isAzure && RETRYABLE_READS.has(tag);
+  for (let attempt = 0; ; attempt++) {
+    throwIfConnectionAborted(signal);
+    try { return await operation(attempt); }
+    catch (error) {
+      if (error.code === 'PROCESS_CLEANUP_FAILED') throw error;
+      throwIfConnectionAborted(signal);
+      if (!eligible || attempt >= 1 || error.retryable !== true) throw error;
+      onProgress?.({ phase: 'retrying' });
+      onRetry(error.category);
+      await wait(5000, undefined, { signal });
+      throwIfConnectionAborted(signal);
+    }
+  }
+}
+
 export function sqlcmdFailure(error, { stderr = '', stdout = '', output = '' } = {}, cfg = {}, tag = 'query') {
+  const classification = classifySqlFailure(error, { stderr, stdout, output });
   let guidance;
   if (error.code === 'ENOENT') guidance = 'Go sqlcmd was not found. Install Microsoft.Sqlcmd and restart SQL Pulse.';
   else if (error.killed || error.code === 'ETIMEDOUT' || error.signal === 'SIGTERM') {
     guidance = 'SQL connection/query timed out. Check the endpoint, port, network access and encryption settings.';
   }
+  else if (['azuread-integrated', 'azuread-interactive'].includes(cfg.auth) &&
+      /login failed for user/i.test(`${stderr}\n${stdout}\n${output}`)) {
+    guidance = 'Microsoft sign-in and SQL access are separate. Verify the SQL resource tenant, Entra login/user permissions and database. Use Sign in again to refresh the Microsoft session.';
+  }
+  else if (classification.category === 'authentication') guidance = 'Microsoft authentication requires attention. Use explicit Test/Load sign-in; monitoring will not open a browser. This does not establish a SQL service outage.';
+  else if (classification.category.startsWith('network-')) guidance = 'The client could not maintain the SQL network connection. Check DNS, VPN/private routing, firewall and endpoint port; a running SQL service does not guarantee this client route is available.';
+  else if (classification.category === 'azure-transient') guidance = 'Azure SQL returned a temporary availability or resource-limit error. This can occur during reconfiguration or throttling even while the SQL service is running.';
   const details = [...new Set([stderr, stdout, output].map(value => redactSqlDiagnostic(value, cfg)).filter(Boolean))];
   if (!details.length && !guidance) {
     const fallback = redactSqlDiagnostic(error.message, cfg);
     details.push(fallback || `Process exited with code ${typeof error.code === 'number' ? error.code : 'unknown'}.`);
   }
-  return new Error(`sqlcmd ${tag} failed: ${[guidance, ...details].filter(Boolean).join(' | ').slice(0, 6000)}`);
+  return Object.assign(new Error(`sqlcmd ${tag} failed: ${[guidance, ...details].filter(Boolean).join(' | ').slice(0, 6000)}`), classification);
 }

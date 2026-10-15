@@ -7,6 +7,8 @@
 .ops-fields label{display:flex;flex-direction:column;gap:4px;font-size:12px;}
 .ops-fields input,.ops-fields select{width:100%;min-width:0;border:1px solid var(--cp-border);background:var(--cp-surface);color:var(--cp-text);padding:7px;border-radius:8px;font:inherit;}
 .ops-modal .ops-check{display:flex;align-items:center;gap:8px;margin:12px 0;}
+.ops-retention-field{display:flex;align-items:center;gap:12px;font-size:13px;margin:12px 0;}
+.ops-retention-field input{width:80px;box-sizing:border-box;text-align:center;border:1px solid var(--cp-border);border-radius:8px;padding:7px;background:var(--cp-surface);color:var(--cp-text);font:inherit;}
 .ops-status-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:8px 0;}
 .ops-status-grid>div{padding:8px;background:var(--cp-surface-soft);border:1px solid var(--cp-border);border-radius:8px;overflow-wrap:anywhere;}
 .ops-modal dd{margin:4px 0 0;font-size:12px;}

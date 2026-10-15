@@ -12,6 +12,7 @@ import { computeHealth } from './health.js';
 import { createMonitorSettings, monitorHealth } from './monitor-settings.mjs';
 import { createHistoryStore } from './history-store.mjs';
 import { createIncidentService } from './incident-store.mjs';
+import { createOperationalInsights, insightTime } from './operational-insights.mjs';
 import { createAlertService } from './alerts.mjs';
 import { createMicrosoftEmailAuth } from './microsoft-email-auth.mjs';
 import { createCounterRunner, normalizeCounter, validateCounterSql } from './counters.mjs';
@@ -20,8 +21,8 @@ import { createAiPreviewStore } from './ai-preview.mjs';
 import { sqlcmdPaths } from './sqlcmd-paths.mjs';
 import { classifySqlEndpoint } from './sql-endpoint.js';
 import { createAzureSqlAuth } from './azure-sql-auth.mjs';
-import { createConnectionProgress, connectionAbortError, throwIfConnectionAborted, commitConnection } from './connection-progress.mjs';
-import { buildSqlcmdArgs, validateConnectionConfig, sqlcmdEnvironment, sqlcmdFailure, redactSqlDiagnostic } from './sqlcmd-options.mjs';
+import { createConnectionProgress, connectionAbortError, throwIfConnectionAborted, commitConnection, connectionSignInOptions } from './connection-progress.mjs';
+import { buildSqlcmdArgs, validateConnectionConfig, sqlcmdEnvironment, sqlcmdFailure, redactSqlDiagnostic, sqlExecutionBudget, runSqlReadWithRetry } from './sqlcmd-options.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.resolve(process.env.SQL_DASHBOARD_DATA_DIR || __dirname);
@@ -245,7 +246,9 @@ const TOP_QUERIES_SQL_AZURE = `
 SET NOCOUNT ON;
 SET ANSI_WARNINGS ON;
 SELECT JSON_QUERY((
-    SELECT TOP 15 DB_NAME() AS db_name, q.query_id, SUM(rs.count_executions) AS execs,
+    SELECT TOP 15 DB_NAME() AS db_name, DB_ID() AS database_id,
+      (SELECT create_date FROM sys.databases WHERE database_id=DB_ID()) AS database_create_date,
+      q.query_id, SUM(rs.count_executions) AS execs,
       CAST(SUM(rs.avg_cpu_time*rs.count_executions)/1000.0 AS DECIMAL(18,1)) AS total_cpu_ms,
       CAST(SUM(rs.avg_cpu_time*rs.count_executions)/NULLIF(SUM(rs.count_executions),0)/1000.0 AS DECIMAL(18,1)) AS avg_cpu_ms,
       CAST(SUM(rs.avg_duration*rs.count_executions)/NULLIF(SUM(rs.count_executions),0)/1000.0 AS DECIMAL(18,1)) AS avg_dur_ms,
@@ -323,7 +326,7 @@ SELECT
   CAST(NULL AS NVARCHAR(MAX)) AS buffer_pool,
   JSON_QUERY((SELECT TOP 20 s.session_id, s.login_name, s.host_name, s.program_name,
      r.status, r.command, r.wait_type, r.wait_time AS wait_ms, r.blocking_session_id AS blocked_by,
-     DB_NAME(r.database_id) AS db_name,
+     DB_NAME(r.database_id) AS db_name, r.database_id,
      LEFT(REPLACE(REPLACE(REPLACE(st.text,CHAR(13),' '),CHAR(10),' '),CHAR(9),' '),200) AS query_text
    FROM sys.dm_exec_sessions s
    JOIN sys.dm_exec_requests r ON s.session_id = r.session_id
@@ -390,7 +393,7 @@ SELECT
    FOR JSON PATH)) AS file_io,
   JSON_QUERY((SELECT TOP 20 s.session_id, s.login_name, s.host_name, s.program_name,
      r.status, r.command, r.wait_type, r.wait_time AS wait_ms, r.blocking_session_id AS blocked_by,
-     DB_NAME(r.database_id) AS db_name,
+     DB_NAME(r.database_id) AS db_name, r.database_id,
      LEFT(REPLACE(REPLACE(st.text,CHAR(13),' '),CHAR(10),' '),200) AS query_text,
      CONVERT(NVARCHAR(200), r.plan_handle, 1) AS plan_handle_hex
    FROM sys.dm_exec_sessions s
@@ -416,11 +419,12 @@ SELECT
    ORDER BY wait_time_ms DESC
    FOR JSON PATH)) AS latches,
   JSON_QUERY((
-    SELECT session_id, blocking_session_id, wait_type, wait_ms, wait_resource, db_name,
+    SELECT session_id, blocking_session_id, wait_type, wait_ms, wait_resource, db_name, database_id,
            command, status, open_transaction_count, login_name, host_name, program_name, query_text, plan_handle_hex
     FROM (
       SELECT s.session_id, ISNULL(r.blocking_session_id,0) AS blocking_session_id, r.wait_type, r.wait_time AS wait_ms,
-             r.wait_resource, DB_NAME(COALESCE(r.database_id,s.database_id)) AS db_name, r.command,
+             r.wait_resource, DB_NAME(COALESCE(r.database_id,s.database_id)) AS db_name,
+             COALESCE(r.database_id,s.database_id) AS database_id, r.command,
              COALESCE(r.status,s.status) AS status, s.open_transaction_count,
              s.login_name, s.host_name, s.program_name,
              LEFT(REPLACE(REPLACE(st.text,CHAR(13),' '),CHAR(10),' '),200) AS query_text,
@@ -439,7 +443,7 @@ SELECT
   JSON_QUERY((SELECT TOP 20 owt.session_id, owt.wait_duration_ms AS wait_ms, owt.wait_type,
      owt.blocking_session_id AS blocked_by, owt.resource_description,
      es.program_name, es.login_name, es.host_name,
-     DB_NAME(er.database_id) AS db_name,
+     DB_NAME(er.database_id) AS db_name, er.database_id,
      LEFT(REPLACE(REPLACE(st.text,CHAR(13),' '),CHAR(10),' '),200) AS query_text,
      CONVERT(NVARCHAR(200), er.plan_handle, 1) AS plan_handle_hex,
      es.cpu_time, es.memory_usage
@@ -455,14 +459,17 @@ FOR JSON PATH, WITHOUT_ARRAY_WRAPPER;
 
 function buildInventorySql(azureDb, { bufferPoolEnabled = true } = {}) {
   const sections = {
-    databases: azureDb ? `SELECT DB_NAME() AS name, 'ONLINE' AS state, 'FULL' AS recovery,
+    databases: azureDb ? `SELECT DB_NAME() AS name, DB_ID() AS database_id,
+      (SELECT create_date FROM sys.databases WHERE database_id=DB_ID()) AS database_create_date,
+      'ONLINE' AS state, 'FULL' AS recovery,
       (SELECT compatibility_level FROM sys.databases WHERE database_id=DB_ID()) AS compat,
       CAST(SUM(CASE WHEN type=0 THEN size END)*8.0/1024 AS DECIMAL(18,1)) AS data_mb,
       CAST(SUM(CASE WHEN type=1 THEN size END)*8.0/1024 AS DECIMAL(18,1)) AS log_mb,
       NULL AS last_full_backup, NULL AS last_log_backup,
       (SELECT CAST(actual_state AS INT) FROM sys.database_query_store_options) AS qs_on
       FROM sys.database_files FOR JSON PATH, INCLUDE_NULL_VALUES`
-      : `SELECT d.name, d.state_desc AS state, d.recovery_model_desc AS recovery, d.compatibility_level AS compat,
+      : `SELECT d.name, d.database_id, d.create_date AS database_create_date,
+      d.state_desc AS state, d.recovery_model_desc AS recovery, d.compatibility_level AS compat,
       CAST(SUM(CASE WHEN f.type=0 THEN f.size END)*8.0/1024 AS DECIMAL(18,1)) AS data_mb,
       CAST(SUM(CASE WHEN f.type=1 THEN f.size END)*8.0/1024 AS DECIMAL(18,1)) AS log_mb,
       CASE WHEN CAST(SERVERPROPERTY('EngineEdition') AS INT)=8 THEN NULL ELSE
@@ -471,12 +478,12 @@ function buildInventorySql(azureDb, { bufferPoolEnabled = true } = {}) {
         (SELECT MAX(backup_finish_date) FROM msdb.dbo.backupset b WHERE b.database_name=d.name AND b.type='L') END AS last_log_backup,
       CAST(d.is_query_store_on AS INT) AS qs_on
       FROM sys.databases d JOIN sys.master_files f ON d.database_id=f.database_id
-      GROUP BY d.name,d.state_desc,d.recovery_model_desc,d.compatibility_level,d.is_query_store_on
+      GROUP BY d.name,d.database_id,d.create_date,d.state_desc,d.recovery_model_desc,d.compatibility_level,d.is_query_store_on
       ORDER BY d.name FOR JSON PATH, INCLUDE_NULL_VALUES`,
-    ...(azureDb || !bufferPoolEnabled ? {} : { buffer_pool: `SELECT DB_NAME(database_id) AS db_name,COUNT_BIG(*)*8/1024 AS buffer_mb
+    ...(azureDb || !bufferPoolEnabled ? {} : { buffer_pool: `SELECT DB_NAME(database_id) AS db_name,database_id,COUNT_BIG(*)*8/1024 AS buffer_mb
       FROM sys.dm_os_buffer_descriptors WHERE database_id<>32767
       GROUP BY database_id ORDER BY COUNT_BIG(*) DESC FOR JSON PATH` }),
-    missing_indexes: `SELECT TOP 15 ${azureDb ? 'DB_NAME()' : 'DB_NAME(mid.database_id)'} AS db_name,
+    missing_indexes: `SELECT TOP 15 ${azureDb ? 'DB_NAME()' : 'DB_NAME(mid.database_id)'} AS db_name, mid.database_id,
       OBJECT_SCHEMA_NAME(mid.object_id${azureDb ? '' : ',mid.database_id'}) AS schema_name,
       OBJECT_NAME(mid.object_id${azureDb ? '' : ',mid.database_id'}) AS table_name,
       migs.user_seeks+migs.user_scans AS user_impact_count,
@@ -506,7 +513,10 @@ SET ANSI_WARNINGS ON;
 DECLARE @topqSql NVARCHAR(MAX)=N'';
 SELECT @topqSql = @topqSql + '
 UNION ALL
-SELECT * FROM (SELECT TOP 15 '''+REPLACE(d.name,'''','''''')+''' AS db_name, q.query_id, SUM(rs.count_executions) AS execs,
+SELECT * FROM (SELECT TOP 15 '''+REPLACE(d.name,'''','''''')+''' AS db_name,
+   '+CAST(d.database_id AS NVARCHAR(12))+' AS database_id,
+   CAST('''+CONVERT(NVARCHAR(30),d.create_date,126)+''' AS datetime2) AS database_create_date,
+   q.query_id, SUM(rs.count_executions) AS execs,
    CAST(SUM(rs.avg_cpu_time*rs.count_executions)/1000.0 AS DECIMAL(18,1)) AS total_cpu_ms,
    CAST(SUM(rs.avg_cpu_time*rs.count_executions)/NULLIF(SUM(rs.count_executions),0)/1000.0 AS DECIMAL(18,1)) AS avg_cpu_ms,
    CAST(SUM(rs.avg_duration*rs.count_executions)/NULLIF(SUM(rs.count_executions),0)/1000.0 AS DECIMAL(18,1)) AS avg_dur_ms,
@@ -539,6 +549,16 @@ SELECT JSON_QUERY(@topq) AS top_queries FOR JSON PATH, WITHOUT_ARRAY_WRAPPER;
 const sqlProcessLimiter = createAsyncLimiter(2);
 const sectionCollector = createSectionCache();
 async function runSqlcmdOutput(cfg, sql, tag, extraArgs, timeoutMs, options = {}) {
+  const signal = options.signal ? AbortSignal.any([options.signal, shutdownController.signal]) : shutdownController.signal;
+  validateConnectionConfig(cfg, { requireDatabase: false });
+  return runSqlReadWithRetry(cfg, tag, attempt => runSqlcmdAttempt(cfg, sql, tag, extraArgs, timeoutMs, {
+    ...options, signal, forceLogin: attempt === 0 && options.forceLogin === true,
+  }), {
+    signal, onProgress: options.onProgress,
+    onRetry: category => console.error(`Azure SQL ${tag}: ${category}; retrying the built-in read once after 5 seconds with a new connection.`),
+  });
+}
+async function runSqlcmdAttempt(cfg, sql, tag, extraArgs, timeoutMs, options = {}) {
   options = { ...options, signal: options.signal
     ? AbortSignal.any([options.signal, shutdownController.signal]) : shutdownController.signal };
   throwIfConnectionAborted(options.signal);
@@ -551,13 +571,14 @@ async function runSqlcmdOutput(cfg, sql, tag, extraArgs, timeoutMs, options = {}
     return await sqlProcessLimiter(() => azureSqlAuth.withSession(cfg, async session => {
       throwIfConnectionAborted(options.signal);
       options.onProgress?.({ phase: 'connecting' });
-      const args = buildSqlcmdArgs(cfg, [...extraArgs, '-i', sqlFile, '-o', outFile]);
+      const budget = sqlExecutionBudget(cfg, extraArgs, timeoutMs);
+      const args = buildSqlcmdArgs(cfg, [...budget.args, '-i', sqlFile, '-o', outFile]);
       if (tag === 'test' || tag === 'engine') options.onProgress?.({ phase: tag === 'test' ? 'testing' : 'probing' });
       const result = await new Promise((resolve, reject) => {
         let child;
         const aborted = () => { child?.kill?.(); };
         child = execFile(pickSqlcmd(cfg), args, {
-          timeout: timeoutMs, windowsHide: true, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024,
+          timeout: budget.timeoutMs, windowsHide: true, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024,
           env: sqlcmdEnvironment(cfg, process.env, session.tenant || cfg.tenant),
         }, (error, stdout, stderr) => {
           Promise.resolve().then(() => {
@@ -667,6 +688,13 @@ async function collectFor(cfg, policy = {}) {
   data.server_name_config = cfg.name;
   data.engine = isAzureSqlDb(cfg) ? 'azure-sqldb' : isAzureManagedInstance(cfg) ? 'azure-mi' : 'onprem';
   data.engine_edition = cfg.engineEdition;
+  data.datasetIdentity = connectionIdentity(cfg);
+  for (const name of ['instance', 'waits', 'file_io', 'active', 'tempdb', 'latches', 'blocking', 'waiters']) {
+    data.sectionMetadata[name] = {
+      sampledAt: data.generated_at, stale: false,
+      applicable: !(useAzureDbBatch && ['tempdb', 'latches', 'blocking', 'waiters'].includes(name)),
+    };
+  }
   data.waits ??= [];
   data.file_io ??= [];
   data.active ??= [];
@@ -861,7 +889,11 @@ async function configureEmailMonitoring(settings) {
 // ==============================
 const HISTORY_DIR = path.join(DATA_DIR, 'history');
 await mkdir(HISTORY_DIR, { recursive: true });
-const historical = createHistoryStore({ dataDir: DATA_DIR, serializeSample: extractHistorySample });
+const historical = createHistoryStore({ dataDir: DATA_DIR, serializeSample: extractHistorySample,
+  getCaptureConsent: () => incidents.settings() });
+const operationalInsights = createOperationalInsights({
+  dataDir: DATA_DIR, history: historical, incidents, getServers: loadServers,
+});
 let maintenanceJob, maintenanceSummary = null;
 async function maintainTelemetry() {
   if (maintenanceJob) return maintenanceJob;
@@ -1069,6 +1101,7 @@ const assets = new Map([
   ['/operations-ui.js', ['operations-ui.js', 'text/javascript; charset=utf-8']],
   ['/operations-ui.css', ['operations-ui.css', 'text/css; charset=utf-8']],
   ['/history-ui.js', ['history-ui.js', 'text/javascript; charset=utf-8']],
+  ['/insights-ui.js', ['insights-ui.js', 'text/javascript; charset=utf-8']],
   ['/history-ui.css', ['history-ui.css', 'text/css; charset=utf-8']],
   ['/diagnostics-ui.js', ['diagnostics-ui.js', 'text/javascript; charset=utf-8']],
   ['/diagnostics-ui.css', ['diagnostics-ui.css', 'text/css; charset=utf-8']],
@@ -1140,7 +1173,11 @@ const server = http.createServer(async (req, res) => {
       }
       if (p === '/api/monitor/status' && req.method === 'GET') return json(res, 200, await operationsStatus());
       if (p === '/api/diagnostics/settings' && req.method === 'GET') return json(res, 200, await incidents.settings());
-      if (p === '/api/diagnostics/settings' && req.method === 'POST') return json(res, 200, await incidents.configure(await readBody(req)));
+      if (p === '/api/diagnostics/settings' && req.method === 'POST') {
+        const settings = await incidents.configure(await readBody(req));
+        await historical.redactEvidence();
+        return json(res, 200, settings);
+      }
       if (p.startsWith('/api/diagnostics/') && req.method === 'GET') {
         const id = url.searchParams.get('serverId');
         findServer(await loadServers(), id);
@@ -1255,6 +1292,7 @@ const server = http.createServer(async (req, res) => {
       };
       if (cfg.server !== stored.server || cfg.connectionType !== (stored.connectionType || 'auto')) delete cfg.engineEdition;
       validateRequestConnection(cfg, { requireDatabase: false });
+      const signInOptions = connectionSignInOptions(cfg, body, context);
       if (!cfg.password && !body.clearPassword && stored.id &&
           cfg.auth === stored.auth &&
           cfg.server.trim().toLowerCase() === stored.server.trim().toLowerCase() &&
@@ -1269,7 +1307,7 @@ const server = http.createServer(async (req, res) => {
         const parsed = await runSqlcmdJson(cfg, `SET NOCOUNT ON;
 SET ANSI_WARNINGS ON;
 SELECT (SELECT name FROM sys.databases WHERE database_id > 4 AND state_desc='ONLINE' ORDER BY name FOR JSON PATH) AS dbs;`,
-          'dblist', 15, { ...context, allowLogin: true });
+          'dblist', 15, { ...signInOptions, allowLogin: true });
         throwIfConnectionAborted(context.signal);
         const rows = Array.isArray(parsed) ? parsed : typeof parsed?.dbs === 'string' ? JSON.parse(parsed.dbs) : null;
         if (!Array.isArray(rows)) throw new Error('Database list returned an unexpected SQL result');
@@ -1311,7 +1349,7 @@ SELECT (SELECT name FROM sys.databases WHERE database_id > 4 AND state_desc='ONL
         trustCert: body.trustCert !== false,
         addedAt: new Date().toISOString(),
       };
-      const t = await testConnection(cfg, context);
+      const t = await testConnection(cfg, connectionSignInOptions(cfg, body, context));
       throwIfConnectionAborted(context.signal);
       if (!t.ok) return json(res, 400, { error: 'Connection test failed: ' + t.error });
       try { cfg.engineEdition = await probeEngineEdition(cfg, context); }
@@ -1377,7 +1415,7 @@ SELECT (SELECT name FROM sys.databases WHERE database_id > 4 AND state_desc='ONL
         plainForTest = await decryptPassword(current.passwordEnc || '');
       } else candidate.passwordEnc = '';
       const testCfg = { ...candidate, password: plainForTest };
-      const t = await testConnection(testCfg, context);
+      const t = await testConnection(testCfg, connectionSignInOptions(testCfg, body, context));
       throwIfConnectionAborted(context.signal);
       if (!t.ok) throw requestError(400, 'Connection test failed: ' + t.error);
       try { candidate.engineEdition = await probeEngineEdition(testCfg, context); }
@@ -1535,19 +1573,43 @@ FOR JSON PATH, WITHOUT_ARRAY_WRAPPER;
       const arr = await loadHistory(id);
       return json(res, 200, arr.slice(-limit));
     }
+    if (p.startsWith('/api/reports/')) {
+      if (req.method === 'POST' && !/^application\/json(?:;|$)/i.test(req.headers['content-type'] || '')) {
+        throw requestError(415, 'Report requests require application/json');
+      }
+      if (p === '/api/reports/settings' && req.method === 'GET') return json(res, 200, await operationalInsights.settings());
+      if (p === '/api/reports/settings' && req.method === 'POST') return json(res, 200, await operationalInsights.configure(await readBody(req)));
+      if (p === '/api/reports/list' && req.method === 'GET') return json(res, 200, await operationalInsights.list());
+      if (p === '/api/reports/generate' && req.method === 'POST') {
+        const body = await readBody(req);
+        if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => !['from', 'to'].includes(key))) {
+          throw requestError(400, 'Report generation requires only from and to epoch milliseconds.');
+        }
+        return json(res, 200, await operationalInsights.generate(body));
+      }
+    }
     if (p.startsWith('/api/history/') && req.method === 'GET') {
       const id = url.searchParams.get('serverId');
-      findServer(await loadServers(), id);
+      findServer(await serverStore.read(), id);
       const options = {
         from: url.searchParams.get('from') || undefined, to: url.searchParams.get('to') || undefined,
         resolution: url.searchParams.get('resolution') || 'auto',
         limit: url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : undefined,
         baseline: url.searchParams.get('baseline') || 'day',
       };
-      if (p === '/api/history/range') return json(res, 200, await historical.query(id, options));
+      if (p === '/api/history/range') return json(res, 200, await historical.query(id, { ...options, includeVisual: false }));
+      if (p === '/api/history/detail') return json(res, 200, await historical.detail(id, {
+        ...options, at: url.searchParams.get('at'),
+      }));
       if (p === '/api/history/compare') return json(res, 200, await historical.compare(id, options));
       if (p === '/api/history/context') return json(res, 200, await historical.context(id, options));
       if (p === '/api/history/status') return json(res, 200, await historical.status(id));
+      if (p === '/api/history/baseline') return json(res, 200, await operationalInsights.baseline(id,
+        insightTime(url.searchParams.get('at'), 'at')));
+      if (p === '/api/history/timeline') return json(res, 200, await operationalInsights.timeline(id, {
+        from: insightTime(url.searchParams.get('from'), 'from'), to: insightTime(url.searchParams.get('to'), 'to'),
+        at: insightTime(url.searchParams.get('at'), 'at'),
+      }));
     }
 
     // ==============================
@@ -1717,6 +1779,9 @@ server.listen(PORT, '127.0.0.1', async () => {
     console.error(`Monitoring startup failed: ${redactSqlDiagnostic(error.message)}`);
   }
   void maintainTelemetry();
+  operationalInsights.start(() => {
+    storageErrors.reports = 'Local report generation failed; review Operational summaries in Back in Time capture settings.';
+  }, () => { delete storageErrors.reports; });
 });
 let stopping = false;
 function scheduleShutdown() {
@@ -1727,7 +1792,7 @@ function scheduleShutdown() {
   const timeout = setTimeout(() => process.exit(1), 30000);
   timeout.unref();
   setTimeout(async () => {
-    const closing = Promise.allSettled([emailAlerts.close(), microsoftEmailAuth.close(), ai.close()]);
+    const closing = Promise.allSettled([emailAlerts.close(), microsoftEmailAuth.close(), ai.close(), operationalInsights.close()]);
     await metricsCollector.idle();
     await monitor.idle();
     const results = [...await closing, ...await Promise.allSettled([incidents.close(), ...incidentJobs.values(), maintenanceJob])];
@@ -1740,6 +1805,7 @@ server.on('close', () => {
   clearInterval(heartbeatTimer);
   clearInterval(maintenanceTimer);
   monitor.stop();
+  operationalInsights.close().catch(() => console.error('Local report cleanup failed.'));
   emailMonitoringEnabled = false;
   if (stopping) return;
   emailAlerts.close().catch(() => console.error('Email service cleanup failed.'));

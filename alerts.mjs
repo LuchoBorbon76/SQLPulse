@@ -4,12 +4,13 @@ import { computeHealth } from './health.js';
 import { configIdentity, connectionIdentity } from './collector-cache.mjs';
 import { DEFAULT_ALERT_POLICY, normalizeAlertPolicy, isAlertMaintenance, advanceAlertCondition, alertConditionReady } from './alert-policy.mjs';
 import { normalizeWebhookEndpoint, webhookDestination, renderWebhookPayload, createWebhookSender } from './webhook-delivery.mjs';
+import { EMAIL_DETAIL_VERSION, diagnosticEmailText, diagnosticExample } from './alert-email-details.mjs';
 
 const DEFAULTS = {
   enabled: false, recipients: [], sender: '', intervalSeconds: 60, cooldownSeconds: 120,
   levels: { warning: false, critical: true }, sendRecovery: true, includeServerName: false,
   smtp: { host: '', port: 587, tlsMode: 'starttls', authMode: 'password', usernameEnc: '', passwordEnc: '' }, revision: 0,
-  emailEnabled: true, policy: clonePolicy(), webhooks: [],
+  emailEnabled: true, emailDetailLevel: 'generic', policy: clonePolicy(), webhooks: [],
 };
 function clonePolicy() { return structuredClone(DEFAULT_ALERT_POLICY); }
 const TITLE = { warning: 'Warning', critical: 'Critical', recovery: 'Recovery', escalation: 'Escalation', unavailable: 'Connection unavailable', test: 'Email test' };
@@ -50,6 +51,7 @@ function validateStored(value) {
       !levels || typeof levels.warning !== 'boolean' || typeof levels.critical !== 'boolean' ||
       ['enabled', 'sendRecovery', 'includeServerName'].some(k => typeof value[k] !== 'boolean') ||
       value.emailEnabled !== undefined && typeof value.emailEnabled !== 'boolean' ||
+      value.emailDetailLevel !== undefined && !['generic', 'diagnostic'].includes(value.emailDetailLevel) ||
       value.webhooks !== undefined && (!Array.isArray(value.webhooks) || value.webhooks.length > 10 ||
         value.webhooks.some(w => !w || !/^[A-Za-z0-9_-]{1,64}$/.test(w.id) ||
           !['generic', 'slack', 'teams', 'pagerduty'].includes(w.adapter) || typeof w.label !== 'string' || w.label.length > 80 ||
@@ -106,6 +108,8 @@ function publicSettings(value) {
     levels: { warning: value.levels.warning, critical: value.levels.critical },
     sendRecovery: value.sendRecovery, includeServerName: value.includeServerName,
     emailEnabled: value.emailEnabled ?? true,
+    emailDetailLevel: value.emailDetailLevel ?? 'generic',
+    emailDetailApprovalRequired: value.emailDetailLevel === 'diagnostic' && value.emailDetailVersion !== EMAIL_DETAIL_VERSION,
     policy: normalizeAlertPolicy(value.policy),
     webhooks: (value.webhooks || []).map(w => ({
       id: w.id, adapter: w.adapter, label: w.label, origin: w.origin, fingerprint: w.fingerprint,
@@ -204,10 +208,12 @@ function canConfirmRecovery(reportedKeys, data, reportedIntervalSections = []) {
   });
 }
 
-export function renderAlertMessage(kind, { time, includeServerName = false, serverName = '{{serverName}}' } = {}) {
+export function renderAlertMessage(kind, { time, includeServerName = false, serverName = '{{serverName}}', emailDetailLevel, emailDetailVersion, evidence } = {}) {
   if (!TITLE[kind]) fail('Invalid email event.');
   const description = kind === 'test'
-    ? 'This is a SQL Pulse email delivery test. No SQL metrics or query text are included.'
+    ? emailDetailLevel === 'diagnostic' && emailDetailVersion === EMAIL_DETAIL_VERSION
+      ? 'This is a SYNTHETIC SQL Pulse email delivery test. All sample measurements below are invented, not live SQL metrics.'
+      : 'This is a SQL Pulse email delivery test. No SQL metrics or query text are included.'
     : kind === 'escalation'
       ? 'SQL Pulse detected that a previously reported condition on a monitored SQL connection remains unresolved. This is the one-time escalation approved for this incident.'
     : kind === 'recovery'
@@ -218,7 +224,8 @@ export function renderAlertMessage(kind, { time, includeServerName = false, serv
   const name = String(serverName).replace(/[\x00-\x1f\x7f]/g, ' ').slice(0, 120);
   return {
     subject: `SQL Pulse: ${TITLE[kind]}${kind === 'warning' || kind === 'critical' ? ' alert' : ''}`,
-    text: `${description}\n\nDetected at (UTC): ${time || '{{time}}'}${includeServerName && kind !== 'test' ? `\nConnection label: ${name}` : ''}\n\nOpen SQL Pulse on the monitoring computer to review the event.`,
+    text: `${description}\n\nDetected at (UTC): ${time || '{{time}}'}${includeServerName && kind !== 'test' ? `\nConnection label: ${name}` : ''}\n\n${emailDetailLevel === 'diagnostic' && emailDetailVersion === EMAIL_DETAIL_VERSION
+      ? `${diagnosticEmailText(kind, evidence)}\n\n` : ''}Open SQL Pulse on the monitoring computer to review the event.`,
   };
 }
 
@@ -338,6 +345,8 @@ export function createAlertService({
     if (sender && (!ADDRESS.test(sender) || sender.includes('..'))) fail('Enter a valid sender email address.');
     const enabled = flag(body.enabled, false, 'enabled');
     const emailEnabled = flag(body.emailEnabled, current.emailEnabled ?? true, 'emailEnabled');
+    const emailDetailLevel = body.emailDetailLevel ?? current.emailDetailLevel ?? 'generic';
+    if (!['generic', 'diagnostic'].includes(emailDetailLevel)) fail('Choose generic or diagnostic email content.');
     const webhooks = await normalizeWebhooks(body.webhooks, current.webhooks);
     const policy = normalizeAlertPolicy(body.policy, current.policy || DEFAULT_ALERT_POLICY);
     const levels = body.levels || {};
@@ -368,7 +377,7 @@ export function createAlertService({
       } else if (enabled || required) fail('Sign in with Microsoft before reviewing or enabling email.', 409);
     }
     const result = {
-      enabled, emailEnabled, webhooks, policy, recipients, sender,
+      enabled, emailEnabled, emailDetailLevel, webhooks, policy, recipients, sender,
       intervalSeconds: integer(body.intervalSeconds, 60, 30, 1800, 'Polling interval'),
       cooldownSeconds: integer(body.cooldownSeconds, 120, 60, 86400, 'Notification cooldown'),
       levels: { warning: flag(levels.warning, false, 'warning'), critical: flag(levels.critical, true, 'critical') },
@@ -387,24 +396,31 @@ export function createAlertService({
     return result;
   }
   function newPreview(kind, value, current) {
+    value = { ...value, emailDetailVersion: value.emailDetailLevel === 'diagnostic' ? EMAIL_DETAIL_VERSION : undefined };
     for (const [id, p] of previews) if (p.expires <= clock()) previews.delete(id);
     if (previews.size >= 50) previews.delete(previews.keys().next().value);
     const previewId = randomUUID();
     const expires = clock() + previewTtlMs;
     const previewTime = new Date(clock()).toISOString(), testIncidentId = randomUUID();
     const policy = normalizeAlertPolicy(value.policy);
+    const emailTemplate = event => renderAlertMessage(event, {
+      ...value, ...(event === 'test' ? { time: previewTime } : {}),
+      evidence: { ...diagnosticExample(event, clock()), policy },
+    });
     const templates = kind === 'test'
-      ? [{ kind: 'test', ...renderAlertMessage('test', { time: new Date(clock()).toISOString() }) }]
+      ? [{ kind: 'test', ...emailTemplate('test') }]
       : [
-        ...['warning', 'critical'].filter(k => value.levels[k]).map(k => ({ kind: k, ...renderAlertMessage(k, value) })),
-        ...(value.levels.critical ? [{ kind: 'unavailable', ...renderAlertMessage('unavailable', value) }] : []),
-        ...(value.sendRecovery ? [{ kind: 'recovery', ...renderAlertMessage('recovery', value) }] : []),
-        ...(policy.escalationSeconds > 0 ? [{ kind: 'escalation', ...renderAlertMessage('escalation', value) }] : []),
+        ...['warning', 'critical'].filter(k => value.levels[k]).map(k => ({ kind: k, ...emailTemplate(k) })),
+        ...(value.levels.critical ? [{ kind: 'unavailable', ...emailTemplate('unavailable') }] : []),
+        ...(value.sendRecovery ? [{ kind: 'recovery', ...emailTemplate('recovery') }] : []),
+        ...(policy.escalationSeconds > 0 ? [{ kind: 'escalation', ...emailTemplate('escalation') }] : []),
       ];
+    const genericTemplates = templates.map(template => ({ kind: template.kind, ...renderAlertMessage(template.kind,
+      { ...value, emailDetailLevel: 'generic', ...(kind === 'test' ? { time: previewTime } : {}) }) }));
     const configSummary = `Poll every ${value.intervalSeconds}s; notification cooldown ${value.cooldownSeconds}s. Trigger: a new enabled severity or condition, connection unavailable (critical enabled), or recovery of a previously reported condition. Unchanged samples do not send recurring reminders. Require ${policy.sustainSamples} distinct sample(s) and ${policy.sustainSeconds}s sustained; recovery requires ${policy.recoverySamples} sample(s) and ${policy.recoverySeconds}s clear. ${policy.escalationSeconds > 0 ? `One additional generic escalation after ${policy.escalationSeconds}s from the first accepted report while continuously unresolved, on a fresh condition sample; this opt-in escalation is independent of the normal change cooldown.` : 'One-time escalation is disabled.'} ${policy.maintenanceWindows.length} UTC maintenance window(s); acknowledged incidents are suppressed until their expiry.`;
-    const warning = `${value.emailEnabled !== false ? `Email goes to ${value.recipients.join(', ')} via ${value.smtp.host}:${value.smtp.port}. Recipient addresses are visible to these recipients. ` : 'Email delivery is disabled. '}${value.webhooks?.length || 0} approved webhook destination(s). ${value.includeServerName ? 'Connection display names will leave this computer and may reveal private information. ' : 'Messages exclude server addresses, database names, SQL text, custom-counter names and metric values. '}This is periodic detection, not instant SQL push: detection follows the next completed poll and notification delivery can be delayed. Background monitoring runs without a browser only after you approve enabling notifications; the monitoring computer must stay awake and its SQL Pulse Node process must remain running. SMTP/provider policies and charges apply.`;
+    const warning = `${value.emailEnabled !== false ? `Email goes to ${value.recipients.join(', ')} via ${value.smtp.host}:${value.smtp.port}. Recipient addresses are visible to these recipients. ` : 'Email delivery is disabled. '}${value.webhooks?.length || 0} approved webhook destination(s). ${value.includeServerName ? 'Connection display names will leave this computer and may reveal private information. ' : 'Connection display names are omitted. '}${value.emailDetailLevel === 'diagnostic' ? `Diagnostic email format v${EMAIL_DETAIL_VERSION}: bounded numeric health evidence, units, thresholds, source/freshness, sampled durations, incident status and deterministic read-only checks leave this computer. Examples below use invented values; live values vary. Webhooks remain generic. No SQL text, plans, query literals, database names, endpoints, login names or diagnostic error strings are included in diagnostic evidence. ` : 'Messages exclude server addresses, database names, SQL text, custom-counter names and metric values. '}This is periodic detection, not instant SQL push: detection follows the next completed poll and notification delivery can be delayed. Background monitoring runs without a browser only after you approve enabling notifications; the monitoring computer must stay awake and its SQL Pulse Node process must remain running. SMTP/provider policies and charges apply.`;
     const destinations = publicSettings(value).webhooks;
-    const webhookTemplates = destinations.flatMap(destination => templates.map(template => ({
+    const webhookTemplates = destinations.flatMap(destination => genericTemplates.map(template => ({
       destinationId: destination.id, adapter: destination.adapter, label: destination.label,
       destination: destination.destination, fingerprint: destination.fingerprint, kind: template.kind,
       payload: renderWebhookPayload(destination.adapter, {
@@ -412,11 +428,13 @@ export function createAlertService({
         time: kind === 'test' ? previewTime : '{{time}}',
       }, '{{encrypted routing key}}'),
     })));
-    previews.set(previewId, { kind, value: clone(value), baseHash: hash(current), templates: clone(templates), expires, previewTime, testIncidentId });
+    previews.set(previewId, { kind, value: clone(value), baseHash: hash(current), templates: clone(templates), genericTemplates, detailVersion: EMAIL_DETAIL_VERSION, expires, previewTime, testIncidentId });
     return {
       previewId, revision: current.revision || 0, expiresAt: new Date(expires).toISOString(), recipients: [...value.recipients],
       sender: value.sender, templates, subjectTemplate: templates[0]?.subject || '', bodyTemplate: templates[0]?.text || '',
       configSummary, warning, emailEnabled: value.emailEnabled ?? true, destinations, webhookTemplates,
+      emailDetailLevel: value.emailDetailLevel ?? 'generic', emailDetailVersion: value.emailDetailVersion,
+      privacy: { diagnosticEvidence: value.emailDetailLevel === 'diagnostic', connectionDisplayName: value.includeServerName, syntheticExamples: value.emailDetailLevel === 'diagnostic' },
       policy, smtp: { host: value.smtp.host, port: value.smtp.port, tlsMode: value.smtp.tlsMode, authMode: value.smtp.authMode ?? 'password' },
     };
   }
@@ -425,6 +443,7 @@ export function createAlertService({
     previews.delete(id);
     if (!receipt || receipt.kind !== kind || receipt.expires <= clock()) fail('Email approval expired or was already used. Preview again.', 409);
     if (receipt.baseHash !== hash(current)) fail('Email settings changed after preview. Preview again.', 409);
+    if (receipt.detailVersion !== EMAIL_DETAIL_VERSION) fail('Email format changed after preview. Preview again.', 409);
     return receipt;
   }
   function appendHistory(state, status, details = {}) {
@@ -474,7 +493,7 @@ export function createAlertService({
     }
     return { status: 'accepted', time: new Date(clock()).toISOString(), message: 'SMTP accepted the message for all recipients. Inbox delivery is not guaranteed.' };
   }
-  async function deliver(config, message, { incidentId = randomUUID(), deliveredTo = [], uncertainTo = [], time = new Date(clock()).toISOString() } = {}) {
+  async function deliver(config, message, { emailMessage = message, incidentId = randomUUID(), deliveredTo = [], uncertainTo = [], time = new Date(clock()).toISOString() } = {}) {
     const emailIdentity = `email:${hash({ recipients: config.recipients, sender: config.sender, host: config.smtp.host })}`;
     const identities = new Set([...(config.emailEnabled !== false ? [emailIdentity] : []),
       ...(config.webhooks || []).map(destination => `${destination.id}:${destination.fingerprint}`)]);
@@ -488,7 +507,7 @@ export function createAlertService({
         if (!definitelyNotSent(error)) uncertainDestinations.push(identity);
       }
     }
-    if (config.emailEnabled !== false) await attempt(emailIdentity, () => deliverEmail(config, message));
+    if (config.emailEnabled !== false) await attempt(emailIdentity, () => deliverEmail(config, emailMessage));
     for (const destination of config.webhooks || []) {
       const destinationIdentity = `${destination.id}:${destination.fingerprint}`;
       await attempt(destinationIdentity, async () => {
@@ -523,7 +542,7 @@ export function createAlertService({
     if (!current) return false;
     return configIdentity(current) === configIdentity(server);
   }
-  async function escalateIncident(server, previous, config, policy, freshSample) {
+  async function escalateIncident(server, previous, config, policy, freshSample, evidence) {
     const incident = previous.incident, prior = incident?.escalation;
     if (!freshSample || !incident || incident.resolved || !previous.reportedActive || !policy.escalationSeconds ||
       clock() - incident.reportedAt < policy.escalationSeconds * 1000) return null;
@@ -541,9 +560,10 @@ export function createAlertService({
     await stateStore.update(state => { state.servers[server.id] = previous; });
     let status, sent;
     try {
-      status = await deliver(config, { kind: 'escalation', ...renderAlertMessage('escalation', {
-        time: new Date(clock()).toISOString(), includeServerName: config.includeServerName, serverName: server.name || 'Monitored connection',
-      }) }, { incidentId: incident.id, deliveredTo: next.acceptedDestinations, uncertainTo: next.uncertainDestinations });
+      const options = { ...config, time: new Date(clock()).toISOString(), serverName: server.name || 'Monitored connection', evidence };
+      status = await deliver(config, { kind: 'escalation', ...renderAlertMessage('escalation', { ...options, emailDetailLevel: 'generic' }) },
+        { emailMessage: { kind: 'escalation', ...renderAlertMessage('escalation', options) },
+          incidentId: incident.id, deliveredTo: next.acceptedDestinations, uncertainTo: next.uncertainDestinations });
       next.status = 'accepted'; next.acceptedDestinations = status.acceptedDestinations; sent = true;
     } catch (error) {
       next.status = 'failed'; next.notAccepted = definitelyNotSent(error);
@@ -633,7 +653,7 @@ export function createAlertService({
         const current = await configStore.read();
         const receipt = consumePreview(previewId, 'test', current);
         try {
-          const status = await deliver(receipt.value, receipt.templates[0], { incidentId: receipt.testIncidentId, time: receipt.previewTime });
+          const status = await deliver(receipt.value, receipt.genericTemplates[0], { emailMessage: receipt.templates[0], incidentId: receipt.testIncidentId, time: receipt.previewTime });
           await recordDelivery(status);
           return { ok: true, ...status };
         } catch (error) {
@@ -715,8 +735,10 @@ export function createAlertService({
             return { skipped: 'recovery-disabled' };
           }
           const correctedConfiguration = previous.notAccepted === true && previous.settingsRevision !== config.revision;
+          const evidence = { data: data || {}, issues: health.issues.filter(issue => config.levels[issue.severity]),
+            previousKeys: previous.reportedKeys || [], now: clock(), condition: previous.condition, incident: previous.incident, policy };
           if (!recovery && previous.fingerprint === fingerprint && !previous.retryAt && !correctedConfiguration) {
-            const escalated = await escalateIncident(server, previous, config, policy, freshSample);
+            const escalated = await escalateIncident(server, previous, config, policy, freshSample, evidence);
             if (escalated) return escalated;
           }
           if (previous.fingerprint === fingerprint && !previous.retryAt && !correctedConfiguration) return { skipped: 'unchanged' };
@@ -737,9 +759,10 @@ export function createAlertService({
           // Persist before SMTP so an uncertain outcome/restart cannot duplicate a message.
           await stateStore.update(s => { s.servers[server.id] = next; });
           try {
-            const status = await deliver(config, { kind: eventKind, ...renderAlertMessage(eventKind, {
-              time: new Date(clock()).toISOString(), includeServerName: config.includeServerName, serverName: server.name || 'Monitored connection',
-            }) }, { incidentId: next.incident?.id, deliveredTo: next.deliveredDestinations, uncertainTo: next.uncertainDestinations });
+            const options = { ...config, time: new Date(clock()).toISOString(), serverName: server.name || 'Monitored connection', evidence };
+            const status = await deliver(config, { kind: eventKind, ...renderAlertMessage(eventKind, { ...options, emailDetailLevel: 'generic' }) },
+              { emailMessage: { kind: eventKind, ...renderAlertMessage(eventKind, options) },
+                incidentId: next.incident?.id, deliveredTo: next.deliveredDestinations, uncertainTo: next.uncertainDestinations });
             next.deliveredDestinations = status.acceptedDestinations;
             next.reportedActive = !recovery;
             next.reportedLevel = notificationLevel || health.level;

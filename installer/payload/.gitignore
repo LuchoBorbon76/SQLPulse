@@ -10,6 +10,7 @@ monitor-settings.json
 monitor-heartbeat.json
 incident-settings.json
 incident-evidence.json
+operational-reports.json
 history-settings.json
 .sql-pulse-tools.json
 .sql-pulse-service.json
@@ -35,6 +36,7 @@ tests/.alerts-test-*/
 tests/.package-test-*/
 tests/.alert-operations-*/
 tests/.microsoft-email-auth-*/
+tests/.insights-*/
 .sql-connection-*/
 *.log
 *.log.*

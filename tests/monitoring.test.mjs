@@ -74,7 +74,7 @@ function collectorFixture() {
   };
   const context = {
     Date: FakeDate, WAIT_EXCLUDES: "N'SLEEP_TASK'", sectionCollector: createSectionCache({ now: () => clock }),
-    deriveIntervalMetrics: createIntervalMetrics().sample,
+    deriveIntervalMetrics: createIntervalMetrics().sample, connectionIdentity,
     classifySqlEndpoint, redactSqlDiagnostic, console: { error() {} },
     isAzureDbLike: value => classifySqlEndpoint(value.server, value.connectionType, value.engineEdition).kind === 'azure-sqldb',
     isAzureSqlDb: value => value.engineEdition === 5,

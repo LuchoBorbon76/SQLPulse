@@ -386,7 +386,7 @@ tr.clickable:hover td:first-child{border-left:3px solid var(--cp-accent);padding
       <h3 id="sidebar-settings-title">Settings</h3>
       <button class="btn ghost configure-ai sidebar-setting" id="ai-btn" title="Configure an AI provider"><span class="setting-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="7" width="14" height="13" rx="3"/><path d="M12 3v4M2 12h3m14 0h3M9 16h6"/><circle cx="9" cy="11" r=".8" fill="currentColor"/><circle cx="15" cy="11" r=".8" fill="currentColor"/></svg></span><span class="setting-copy"><strong>Configure AI provider</strong><small>Model &amp; credentials</small></span><span class="setting-chevron" aria-hidden="true">›</span></button>
       <button type="button" class="btn ghost sidebar-setting" id="alert-settings-btn" title="Configure optional email alerts"><span class="setting-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="m3 7 9 6 9-6"/></svg></span><span class="setting-copy"><strong>Email alerts</strong><small>Recipients &amp; delivery</small></span><span class="setting-chevron" aria-hidden="true">›</span></button>
-      <button type="button" class="btn ghost sidebar-setting" id="monitor-settings-btn" title="Collection budgets, retention and collector self-health"><span class="setting-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 12h4l3-7 4 14 3-7h4"/><rect x="2" y="2" width="20" height="20" rx="3"/></svg></span><span class="setting-copy"><strong>Monitoring &amp; history</strong><small>Collection &amp; retention</small></span><span class="setting-chevron" aria-hidden="true">›</span></button>
+      <button type="button" class="btn ghost sidebar-setting" id="monitor-settings-btn" title="Background capture, advanced retention and collector health"><span class="setting-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 12h4l3-7 4 14 3-7h4"/><rect x="2" y="2" width="20" height="20" rx="3"/></svg></span><span class="setting-copy"><strong>Back in Time</strong><small>Background capture</small></span><span class="setting-chevron" aria-hidden="true">›</span></button>
       <div id="email-monitor-status" class="monitor-status" role="status" aria-live="polite" data-state="unknown">Email status not loaded</div>
     </section>
     <div class="sidebar-footer">
@@ -445,7 +445,6 @@ tr.clickable:hover td:first-child{border-left:3px solid var(--cp-accent);padding
           <button class="btn ghost tb" id="pause-btn" title="Pause auto-refresh"><span class="ic">⏸</span><span>Pause</span></button>
           <button class="btn ghost tb" id="counters-btn" title="Manage custom counters"><span class="ic">🎯</span><span>Counters</span></button>
           <button class="btn ghost tb" id="snapshot-btn" title="Save this sample as a comparison baseline"><span class="ic">📸</span><span>Save baseline</span></button>
-          <button type="button" class="btn ghost tb" id="history-btn" title="Investigate persisted historical windows and comparisons" hidden>History</button>
           <button type="button" class="btn ghost tb" id="diagnostics-btn" title="Optional local blocking, deadlock and query-regression evidence" hidden>Diagnostics</button>
         </div>
         <div class="controls-row2">
@@ -473,6 +472,8 @@ tr.clickable:hover td:first-child{border-left:3px solid var(--cp-accent);padding
 
     <section id="overview-view" aria-label="All servers overview"></section>
     <section id="detail-view" aria-label="Detailed server dashboard" hidden>
+    <section id="detail-timebar" class="hst-timebar" aria-label="Back in Time performance controls"></section>
+    <section id="detail-insights" class="hst-timebar ins-panel" aria-label="Stored workload insights"></section>
     <div class="error-banner" id="err"></div>
     <div class="narrative" id="narrative">Select a server to view metrics…</div>
     <div class="panel-heading"><h2>Instance metrics</h2><button type="button" class="btn ghost panel-ai" data-ai-scope="instance" disabled>Ask AI</button></div>
@@ -572,7 +573,7 @@ tr.clickable:hover td:first-child{border-left:3px solid var(--cp-accent);padding
       <h3 style="font-size:13px;margin:16px 0 4px;">Local data and diagnostic limits</h3>
       <p>Saved passwords and API credentials are encrypted with AES-256-GCM and a Windows DPAPI-protected key. Registry metadata, history, and browser snapshots are not encrypted by this app. Protect the Windows account, data folder, and backups. Metrics can be delayed, cumulative, or unavailable because of permissions. Health indicators are heuristics, not availability, backup, or recovery guarantees.</p>
       <p style="margin:10px 0;font-size:12.5px;">
-        <b>Source:</b> <a href="https://github.com/LuchoBorbon76/SQLDashboard" target="_blank" rel="noopener" style="color:var(--cp-accent);">github.com/LuchoBorbon76/SQLDashboard</a>
+        <b>Source:</b> <a href="https://github.com/LuchoBorbon76/SQLPulse" target="_blank" rel="noopener" style="color:var(--cp-accent);">github.com/LuchoBorbon76/SQLPulse</a>
       </p>
       <p style="font-size:12px;color:var(--cp-text-muted);">Created by <span class="sig">Luis Fernando Borbon</span> · © 2026 · MIT License</p>
     </div>
@@ -654,6 +655,10 @@ tr.clickable:hover td:first-child{border-left:3px solid var(--cp-accent);padding
       <label id="f-user-label">Username</label>
       <input type="text" id="f-user" placeholder="username or user@domain.com">
       <div class="hint" id="f-user-hint">Account used to connect to SQL.</div>
+      <div id="f-force-login-field" hidden>
+        <label style="margin-top:8px;"><input type="checkbox" id="f-force-login" style="width:auto;"> Sign in again on the next Test or Load</label>
+        <div class="hint">Refresh Microsoft sign-in instead of reusing the verified Azure CLI session. Does not change SQL permissions.</div>
+      </div>
     </div>
     <div class="field" id="f-pw-field" style="display:none;">
       <label>Password <span id="f-pw-existing-hint" style="display:none;font-weight:400;color:var(--cp-text-muted);font-size:11px;">(leave blank to keep existing)</span></label>
@@ -845,9 +850,9 @@ const compatLabel = (c)=>{
   return c==null?'-':(map[Number(c)] || 'Compat '+c);
 };
 const fmtDate = (s)=> !s?"never":new Date(s).toLocaleString(undefined,{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"});
-const ago = (s)=> {
+const ago = (s, at = Date.now())=> {
   if(!s) return "never";
-  const d = new Date(s), diff = (Date.now()-d.getTime())/1000;
+  const d = new Date(s), diff = (at-d.getTime())/1000;
   if(diff<60) return Math.round(diff)+"s ago";
   if(diff<3600) return Math.round(diff/60)+"m ago";
   if(diff<86400) return Math.round(diff/3600)+"h ago";
@@ -1215,25 +1220,48 @@ const aiReady = import('/ai-ui.js').then(({ initAiUi }) => {
   optionalModuleError('AI', error, ['ai-btn']);
   document.querySelectorAll('[data-ai-scope]').forEach(button => { button.disabled = true; });
 });
-let operationsController, historyController, diagnosticsController;
+let operationsController, historyController, diagnosticsController, insightsController, historicalFrame = null;
+let insightsSelection = null;
+const insightsReady = import('/insights-ui.js').then(({ initInsightsUi }) => {
+  insightsController = initInsightsUi({ host: el('detail-insights') });
+  insightsController.select(insightsSelection || { serverId: dashboardView === 'detail' ? activeServerId : null, mode: 'live' });
+}).catch(error => {
+  optionalModuleError('Stored insights', error, []);
+  el('detail-insights').textContent = 'Stored insights unavailable. Reload to retry.';
+});
 const operationsReady = import('/operations-ui.js').then(({ initOperationsUi }) => {
   operationsController = initOperationsUi({ onChanged: () => refreshCurrentView() });
   el('monitor-settings-btn').addEventListener('click', () => { void operationsController.open(); });
 }).catch(error => optionalModuleError('Monitoring', error, ['monitor-settings-btn']));
-const historyReady = import('/history-ui.js').then(({ initHistoryUi }) => {
+const historyReady = import('/history-ui.js').then(({ initHistoryUi, historicalDashboard }) => {
   historyController = initHistoryUi({
     el, getActiveServerId: () => dashboardView === 'detail' ? activeServerId : null,
-    getServerName: id => servers.find(server => server.id === id)?.name || id,
-    onAskAi: async selection => {
-      await aiReady;
-      if (!aiController) throw new Error('AI interface is unavailable. Reload the dashboard.');
-      if (dashboardView !== 'detail' || activeServerId !== selection.serverId) throw new Error('Selected server changed. Reopen History for the intended server.');
-      historyController.close();
-      await aiController.askVisual({ serverId: selection.serverId, scope: 'history', from: selection.from, to: selection.to,
-        baseline: selection.baseline || 'day', title: 'Historical investigation' });
+    onChange: selection => {
+      if (dashboardView !== 'detail' || activeServerId !== selection.serverId) return;
+      insightsSelection = selection;
+      insightsController?.select(selection);
+      cancelDetailRequests();
+      closeDetail();
+      historicalFrame = selection.mode === 'history'
+        ? historicalDashboard(selection.serverId, selection.point, selection.window, fleetHelpers.sqlServiceKind(servers.find(server => server.id === selection.serverId) || {}))
+        : null;
+      el('err').classList.remove('show');
+      if (historicalFrame) {
+        render(historicalFrame, null);
+        setStatus('paused', 'Back in Time — historical data, not live');
+      } else {
+        const state = serverState.get(activeServerId);
+        if (state?.data) render(state.data, state.prevData);
+        else renderEmpty();
+        updateDetailActions();
+        fetchMetrics(true);
+      }
     },
   });
-}).catch(error => optionalModuleError('Historical investigation', error, ['history-btn']));
+}).catch(error => {
+  optionalModuleError('Back in Time', error, []);
+  el('detail-timebar').textContent = 'Historical controls unavailable. Reload to retry. Values below are live.';
+});
 const diagnosticsReady = import('/diagnostics-ui.js').then(({ initDiagnosticsUi }) => {
   diagnosticsController = initDiagnosticsUi({ getServer: () => dashboardView === 'detail' ? servers.find(server => server.id === activeServerId) : null });
   el('diagnostics-btn').addEventListener('click', () => { void diagnosticsController.open(); });
@@ -1242,7 +1270,7 @@ document.addEventListener('click', async event => {
   const button = event.target.closest('[data-ai-scope]');
   if (!button || !el('detail-view').contains(button)) return;
   const data = serverState.get(activeServerId)?.data;
-  if (button.disabled || dashboardView !== 'detail' || !activeServerId || !data || serverState.get(activeServerId)?.lastError) {
+  if (historyController?.isHistorical() || button.disabled || dashboardView !== 'detail' || !activeServerId || !data || serverState.get(activeServerId)?.lastError) {
     showRegistryError('AI analysis unavailable', new Error('Select a server with a usable sample for this visual first.'));
     return;
   }
@@ -1374,6 +1402,11 @@ function showConnectionProgress(progress){
   el('modal-cancel').textContent = progress.state === 'cancelling' ? 'Stopping…'
     : progress.phase === 'saving' ? 'Saving…' : 'Stop test';
   el('modal-cancel').disabled = progress.cancellable === false || progress.state === 'cancelling';
+  if (['connecting', 'testing', 'probing', 'saving'].includes(progress.phase)) {
+    const reusedSession = connectionBrowser && !connectionBrowser.closed;
+    finishSqlSignInTab();
+    if (reusedSession) el('connection-status').textContent = `Using the verified Microsoft session; no new sign-in was needed. ${progress.message || 'Connecting to SQL.'} (${elapsed}s)`;
+  }
   let signInUrl;
   if (progress.signInUrl) {
     signInUrl = normalizeMicrosoftBrowserUrl(progress.signInUrl);
@@ -1439,6 +1472,7 @@ function openModal(existing){
     ? 'azuread-device-code' : existing?.auth || 'windows';
   el('f-user').value = existing?.user || '';
   el('f-pw').value = '';
+  el('f-force-login').checked = false;
   el('f-database').value = existing?.database || '';
   el('f-encrypt').value = existing?.encrypt === false ? 'false' : 'true';
   el('f-trustcert').value = existing?.trustCert === false ? 'false' : 'true';
@@ -1476,6 +1510,9 @@ async function closeModal(){
 }
 function updateAuthFields(){
   const a = el('f-auth').value;
+  const interactive = ['azuread-interactive', 'azuread-device-code'].includes(a);
+  el('f-force-login-field').hidden = !interactive;
+  if (!interactive) el('f-force-login').checked = false;
   const showUser = a!=='windows';
   const showPw = a==='sqlauth' || a==='azuread-password';
   el('f-user-field').style.display = showUser ? 'block' : 'none';
@@ -1483,7 +1520,7 @@ function updateAuthFields(){
   el('f-user-label').textContent = a.startsWith('azuread') ? 'Entra ID user (user@domain.com)' : 'SQL login';
   el('f-tenant-field').style.display = a.startsWith('azuread') ? 'block' : 'none';
   el('f-user-hint').textContent = a === 'azuread-interactive'
-    ? 'Normal browser sign-in with your tenant-approved method; no device code needed.'
+    ? 'Uses your verified Microsoft session when available; otherwise opens browser sign-in. Select Sign in again to refresh it.'
     : a === 'azuread-device-code' ? 'A copyable code appears in this window. Use this if browser sign-in is unavailable.'
     : a === 'azuread-integrated' ? 'Uses a verified Azure CLI session; it does not use Windows SSPI.'
     : a === 'azuread-password' ? 'Password authentication cannot satisfy MFA.' : 'Account used to connect to SQL.';
@@ -1548,7 +1585,7 @@ async function fetchDatabaseList(){
   el('sql-signin').hidden = true;
   try {
     const body = {
-      server, auth, entraFlow, user, password: pw, serverId: editingServerId || undefined,
+      server, auth, entraFlow, forceLogin: el('f-force-login').checked === true, user, password: pw, serverId: editingServerId || undefined,
       database: el('f-database').value.trim(), connectionType: el('f-target-type').value,
       tenant: el('f-tenant').value.trim(),
       encrypt: el('f-encrypt').value === 'true',
@@ -1558,6 +1595,7 @@ async function fetchDatabaseList(){
     if (startSequence !== connectionStartSequence) return;
     connectionStarting = false;
     const data = await connectionClient.request('/api/list-databases', { body });
+    el('f-force-login').checked = false;
     const dl = el('f-database-list');
     const list = data.databases || [];
     dl.innerHTML = list.map(n=>`<option value="${esc(n)}"></option>`).join('');
@@ -1593,6 +1631,7 @@ async function saveServer(){
     tenant: el('f-tenant').value.trim(),
     auth: el('f-auth').value === 'azuread-device-code' ? 'azuread-interactive' : el('f-auth').value,
     entraFlow: el('f-auth').value === 'azuread-device-code' ? 'device-code' : 'browser',
+    forceLogin: el('f-force-login').checked === true,
     user: el('f-user').value.trim(),
     password: el('f-pw').value,
     database: el('f-database').value.trim(),
@@ -1887,6 +1926,10 @@ function setDashboardView(view){
   el('semaphore').setAttribute('aria-expanded','false');
   countdown = refreshSeconds;
   if (dashboardView === 'overview') {
+    historicalFrame = null;
+    historyController?.selectServer(null);
+    insightsSelection = null;
+    insightsController?.select(null);
     cancelDetailRequests();
     el('current-server-title').textContent = 'All servers';
     el('current-server-sub').textContent = `${servers.length} configured servers · lightweight samples`;
@@ -1900,15 +1943,18 @@ function setDashboardView(view){
 }
 function updateDetailActions(DATA){
   const currentData = arguments.length ? DATA : serverState.get(activeServerId)?.data;
-  const usable = dashboardView === 'detail' && !!currentData && !serverState.get(activeServerId)?.lastError;
-  el('counters-btn').disabled = !countersController || dashboardView !== 'detail' || !activeServerId;
+  const historical = historyController?.isHistorical() === true;
+  const usable = !historical && dashboardView === 'detail' && !!currentData && !serverState.get(activeServerId)?.lastError;
+  el('refresh-btn').disabled = historical;
+  el('pause-btn').disabled = historical;
+  el('interval-sel').disabled = historical;
+  if (historical) el('countdown').textContent = '—';
+  el('counters-btn').disabled = historical || !countersController || dashboardView !== 'detail' || !activeServerId;
   el('counters-btn').hidden = dashboardView !== 'detail';
   el('snapshot-btn').hidden = dashboardView !== 'detail';
   el('snapshot-btn').disabled = !usable;
-  el('history-btn').hidden = dashboardView !== 'detail';
-  el('history-btn').disabled = !historyController || dashboardView !== 'detail' || !activeServerId;
   el('diagnostics-btn').hidden = dashboardView !== 'detail';
-  el('diagnostics-btn').disabled = !diagnosticsController || dashboardView !== 'detail' || !activeServerId;
+  el('diagnostics-btn').disabled = historical || !diagnosticsController || dashboardView !== 'detail' || !activeServerId;
   document.querySelectorAll('#detail-view [data-ai-scope]').forEach(button => {
     const scope = button.dataset.aiScope;
     let available = !!aiController && usable && button.dataset.aiUnavailable !== 'true';
@@ -1920,7 +1966,8 @@ function updateDetailActions(DATA){
     } else if (available && scope === 'instance') available = Object.values(currentData.instance || {}).some(value => typeof value === 'number' && Number.isFinite(value));
     else if (available) available = currentData[scope] != null && currentData.sectionMetadata?.[scope]?.applicable !== false;
     button.disabled = !available;
-    button.title = available ? 'Review SQL context and ask an AI provider about this visual' : 'A collected sample for this visual is required';
+    button.title = historical ? 'Ask AI is disabled for historical visuals to prevent using live context. Return to live to analyze current data.'
+      : available ? 'Review SQL context and ask an AI provider about this visual' : 'A collected sample for this visual is required';
   });
 }
 function renderSectionFreshness(DATA){
@@ -1936,7 +1983,7 @@ function renderSectionFreshness(DATA){
     note.hidden = !metadata;
     if (!metadata) return;
     note.classList.toggle('stale', !!metadata.stale);
-    note.textContent = metadata.applicable === false ? 'Not available for this SQL service.' :
+    note.textContent = DATA.historical ? metadata.error : metadata.applicable === false ? 'Not available for this SQL service.' :
       `${metadata.stale ? 'Stale sample · ' : ''}${metadata.sampledAt ? 'Sampled '+fmtDate(metadata.sampledAt) : 'No sample available'}${metadata.intervalSeconds ? ' · collected every '+metadata.intervalSeconds+'s' : ''}${metadata.lookbackHours ? ' · '+metadata.lookbackHours+'h query lookback' : ''}${metadata.error ? ' · '+metadata.error : ''}`;
   });
 }
@@ -1948,11 +1995,22 @@ window.addEventListener('pagehide', () => { fleetUI?.stop(); cancelDetailRequest
 
 function setActiveServer(id){
   if (!servers.some(s => s.id === id)) return;
+  if (id !== activeServerId || dashboardView !== 'detail') {
+    historicalFrame = null;
+    historyController?.selectServer(id);
+    insightsSelection = { serverId: id, mode: 'live' };
+    insightsController?.select({ serverId: id, mode: 'live' });
+  }
   activeServerId = id;
   setDashboardView('detail');
   countdown = refreshSeconds;
   renderServerList();
   const st = stateFor(id);
+  if (historyController?.isHistorical() && historicalFrame) {
+    render(historicalFrame, null);
+    setStatus('paused', 'Back in Time — historical data, not live');
+    return;
+  }
   // Restore saved baseline snapshot from previous session, if any
   if (!st.snapshot) {
     try {
@@ -1979,7 +2037,7 @@ function setActiveServer(id){
     }).catch(error=>{
       if (error.name === 'AbortError' || controller.signal.aborted || serverState.get(id) !== st) return;
       st.historyError = error.message;
-      if (dashboardView === 'detail' && activeServerId === id) el('timeline').textContent = `History unavailable: ${error.message}. Reopen this server to retry.`;
+      if (dashboardView === 'detail' && activeServerId === id && !historyController?.isHistorical()) el('timeline').textContent = `History unavailable: ${error.message}. Reopen this server to retry.`;
     }).finally(()=>{ if (st.historyRequest === controller) st.historyRequest = null; });
   }
   if (st.data) {
@@ -2013,6 +2071,7 @@ function delta(cur, prev, invert=false){
 }
 
 function fetchMetrics(){
+  if (historyController?.isHistorical()) return;
   if(dashboardView !== 'detail' || document.hidden || !activeServerId || !servers.some(s => s.id === activeServerId)) return;
   if (pauseUpdates.has(activeServerId) || (currentViewPaused() && arguments[0] !== true)) return;
   const requestedId = activeServerId;
@@ -2139,7 +2198,7 @@ function renderTimeline(hist, DATA) {
     let d = ''; let started = false;
     vals.forEach((v, i) => {
       if (v == null || !Number.isFinite(v)) { started = false; return; }
-      if (hist[i].reset || hist[i].counterReset) started = false;
+      if (hist[i].gap || hist[i].reset || hist[i].counterReset) started = false;
       if (i > 0 && hist[i].t - hist[i-1].t > gapThreshold) started = false;
       const x = xAt(i);
       const y = padT + innerH - ((v - min) / range) * innerH;
@@ -2195,7 +2254,8 @@ function renderCustomCounterCards(DATA, hist) {
     const unit = usable ? esc(cc.unit || '') : '';
     const hint = cc.enabled === false ? 'Sampling paused' : cc.error ? `<span style="color:var(--cp-danger)">${esc(cc.error)}</span>`
       : cc.stale ? 'Stale sample — waiting for collection' : usable ? esc(cc.description || 'Custom counter') : 'Waiting for first sample';
-    const sampleNote = `${cc.sampledAt ? 'Sampled '+fmtDate(cc.sampledAt) : ''}${cc.intervalSeconds ? ' · every '+cc.intervalSeconds+'s' : ''}${cc.cached && usable ? ' · cached' : ''}`;
+    const sampledAt = cc.sampledAt || cc.collectedAt;
+    const sampleNote = `${sampledAt ? 'Sampled '+fmtDate(sampledAt) : ''}${cc.intervalSeconds ? ' · every '+cc.intervalSeconds+'s' : ''}${cc.cached && usable ? ' · cached' : ''}`;
     // Build spark from history.custom[cc.id]
     const values = hist.map(s => (s.custom && typeof s.custom[cc.id] === 'number') ? s.custom[cc.id] : null);
     const spark = renderSparklineFromValues(values, hist.map(point => point.t));
@@ -2242,7 +2302,7 @@ function renderSparklineFromValues(values, times) {
 
 function renderHealth(DATA){
   if (dashboardView !== 'detail') return;
-  const h = computeHealth(DATA);
+  const h = computeHealth(DATA, DATA?.historical ? { now: Date.parse(DATA.generated_at) } : {});
   const sem = el('semaphore');
   sem.classList.remove('healthy','warning','critical','unknown');
   if (['healthy','warning','critical'].includes(h.level)) sem.classList.add(h.level);
@@ -2282,8 +2342,9 @@ el('semaphore').addEventListener('keydown', event => {
 
 function render(DATA, PREV){
   if (dashboardView !== 'detail' || (DATA.server_id && DATA.server_id !== activeServerId)) return;
+  if (historicalFrame && historyController?.isHistorical()) { DATA = historicalFrame; PREV = null; }
   try {
-    const unavailable = serverState.get(activeServerId)?.lastError;
+    const unavailable = !DATA.historical && serverState.get(activeServerId)?.lastError;
     el('detail-view').classList.toggle('stale-data', Boolean(unavailable));
     renderHealth(unavailable ? null : DATA);
     if (unavailable) el('health-label').textContent = 'Unavailable';
@@ -2306,7 +2367,7 @@ function render(DATA, PREV){
     for (const [cardId,section] of [['buffer-card','buffer_pool'],['tempdb-card','tempdb']]) {
       const card = el(cardId), metadata = DATA.sectionMetadata?.[section];
       card.classList.toggle('disabled', DATA[section] === null);
-      card.dataset.unavailableLabel = metadata?.disabled ? 'Disabled in Monitoring & history'
+      card.dataset.unavailableLabel = metadata?.disabled ? 'Disabled in Back in Time advanced settings'
         : isAzureDb ? 'Not available on Azure SQL Database' : 'Collection unavailable for this sample';
     }
 
@@ -2319,8 +2380,8 @@ function render(DATA, PREV){
         {label:"Log Write %", value:(i.avg_log_write_percent??0).toFixed(1)+"%", hint:"Log throughput vs. limit", cls:(i.avg_log_write_percent||0)>=80?"warn":"good", d:delta(i.avg_log_write_percent, p?.avg_log_write_percent), spark:'logPct'},
         {label:"Sessions / Connections", value:`${i.user_sessions||0} / ${i.connections||0}`, hint:`${i.active_requests||0} active, ${i.blocked_requests||0} blocked`, cls:"", d:delta(i.user_sessions, p?.user_sessions), spark:'sessions'},
         {label:"Active Requests", value:i.active_requests||0, hint:`${i.blocked_requests||0} blocked`, cls:(i.blocked_requests||0)>0?"crit":"", d:delta(i.active_requests, p?.active_requests), spark:'active'},
-        {label:"Engine Edition", value:i.engine_edition===5?'Azure SQL':i.engine_edition===8?'Managed Inst':(i.engine_edition||'?'), hint:i.edition||''},
-        {label:"Product Version", value:i.product_version||'?', hint:"SQL Server engine build"},
+        {label:"Engine Edition", value:i.engine_edition===5?'Azure SQL':i.engine_edition===8?'Managed Inst':(i.engine_edition||'?'), hint:esc(i.edition||'')},
+        {label:"Product Version", value:esc(i.product_version||'?'), hint:"SQL Server engine build"},
       ];
     } else {
       const pleGood = (i.page_life_expectancy||0) >= 300;
@@ -2340,7 +2401,7 @@ function render(DATA, PREV){
         {label:"Uptime", value:i.uptime_min!=null?(i.uptime_min/60).toFixed(1)+"h":'?', hint:`Started ${fmtDate(i.sqlserver_start_time)}`},
       ];
     }
-    const hist = (serverState.get(DATA.server_id)?.history) || [];
+    const hist = DATA.historical ? DATA.history : (serverState.get(DATA.server_id)?.history) || [];
     const fields = {
       'Avg CPU %':'avg_cpu_percent', 'Avg Memory %':'avg_memory_percent',
       'Data I/O %':'avg_data_io_percent', 'Log Write %':'avg_log_write_percent',
@@ -2356,6 +2417,10 @@ function render(DATA, PREV){
         kpi.value = `${fmtInt(i.user_sessions)} / ${fmtInt(i.connections)}`;
         kpi.hint = `${fmtInt(i.active_requests)} active, ${fmtInt(i.blocked_requests)} blocked`;
       } else if (kpi.label === 'Active Requests') kpi.hint = `${fmtInt(i.blocked_requests)} blocked`;
+      if (DATA.historical && kpi.label === 'Memory In Use') {
+        const gb = value => typeof value === 'number' && Number.isFinite(value) ? (value / 1024).toFixed(1) + ' GB' : 'unavailable';
+        kpi.hint = `Target ${gb(i.target_memory_mb)} / Host ${gb(i.physical_memory_mb)}`;
+      }
       if (!kpi.available) { kpi.value = '—'; kpi.hint = 'Metric unavailable in this sample'; kpi.cls = ''; kpi.badge = ''; kpi.d = null; }
     });
     el('kpis').innerHTML = kpis.map(k=>`
@@ -2387,7 +2452,7 @@ function render(DATA, PREV){
     renderTimeline(hist, DATA);
 
     // Narrative — sourced from computeHealth() so it always matches the semaphore
-    const h = computeHealth(unavailable ? null : DATA);
+    const h = computeHealth(unavailable ? null : DATA, DATA.historical ? { now: Date.parse(DATA.generated_at) } : {});
     if (h.level === 'unknown' || h.level === 'unavailable') {
       el('narrative').textContent = unavailable
         ? `Current health is unavailable. Displaying the last collected sample from ${fmtDate(DATA.generated_at)}; it is not a current health assessment.`
@@ -2409,7 +2474,7 @@ function render(DATA, PREV){
       waitNote = document.createElement('p'); waitNote.className = 'section-sample-note interval-note'; el('waits').before(waitNote);
     }
     waitNote.textContent = waitInterval?.status === 'ready'
-      ? `Current interval: ${Number(DATA.intervals.elapsedSeconds).toFixed(1)} seconds. Not lifetime totals.`
+      ? `${DATA.historical ? 'Recorded interval ending '+(DATA.intervals.sampledAt || DATA.generated_at) : 'Current interval'}: ${Number(DATA.intervals.elapsedSeconds).toFixed(1)} seconds. Not lifetime totals.`
       : `Historical cumulative totals${waitInterval ? `; current interval unavailable (${waitInterval.reason || 'waiting for baseline'})` : ''}. Not proof of a current bottleneck.`;
     const maxWait = Math.max(1, ...waits.map(w=>Number(w.wait_time_s)||0));
     el('waits').innerHTML = waits.map(w=>{
@@ -2421,7 +2486,7 @@ function render(DATA, PREV){
       if(critical.some(c=>wtype.includes(c))) cls = "crit";
       else if(wtype.startsWith("LCK") || wtype.includes("LATCH")) cls = "warn";
       const wtDisplay = wt_s>=60 ? (wt_s/60).toFixed(1)+"m" : wt_s.toFixed(1)+"s";
-      return `<div class="bar-row" title="${w.tasks||0} tasks, avg ${w.avg_wait_ms||0}ms"><div class="name">${esc(wtype)}</div><div class="bar-bg"><div class="bar-fill ${cls}" style="width:${pct}%"></div></div><div class="val">${wtDisplay}</div></div>`;
+      return `<div class="bar-row" title="${fmtInt(w.tasks)} tasks, avg ${fmtN(w.avg_wait_ms)}ms"><div class="name">${esc(wtype)}</div><div class="bar-bg"><div class="bar-fill ${cls}" style="width:${pct}%"></div></div><div class="val">${wtDisplay}</div></div>`;
     }).join('') || '<div class="empty">No wait stats.</div>';
 
     // Buffer donut (may be null on Azure — card grayed above)
@@ -2461,7 +2526,7 @@ function render(DATA, PREV){
 
     const tq = DATA.top_queries||[];
     el('top-queries').innerHTML = tq.map(q=>`
-      <tr class="clickable" data-qtype="query" data-db="${esc(q.db_name)}" data-qid="${esc(q.query_id)}">
+      <tr${DATA.historical ? '' : ' class="clickable"'} data-qtype="query" data-db="${esc(q.db_name)}" data-qid="${esc(q.query_id)}">
         <td><span class="pill muted">${esc(q.db_name)}</span></td>
         <td class="mono">${esc(q.query_id)}</td>
         <td class="num">${fmtInt(q.execs)}</td>
@@ -2469,8 +2534,8 @@ function render(DATA, PREV){
         <td class="num">${fmtN(q.avg_cpu_ms)}</td>
         <td class="num">${fmtN(q.avg_dur_ms)}</td>
         <td class="num">${fmtInt(q.avg_reads)}</td>
-        <td class="mono" style="white-space:nowrap;">${ago(q.last_exec)}</td>
-        <td><div class="query-text" title="${esc(q.query_text||'')}">${esc(q.query_text||'')}</div></td>
+        <td class="mono" style="white-space:nowrap;" title="${esc(q.last_exec||'')}">${DATA.historical ? q.last_exec ? ago(q.last_exec, Date.parse(DATA.generated_at)) + ' at sample' : 'Not retained' : ago(q.last_exec)}</td>
+        <td><div class="query-text" title="${esc(q.query_text||'')}">${DATA.historical && !q.query_text ? 'SQL text not retained (opt-in)' : esc(q.query_text||'')}</div></td>
       </tr>`).join('') || '<tr><td colspan="9" class="empty">No queries captured yet.</td></tr>';
     el('top-queries').querySelectorAll('tr.clickable').forEach(tr=>{
       tr.addEventListener('click', ()=>openQueryDetail(tr.dataset.db, tr.dataset.qid));
@@ -2479,7 +2544,7 @@ function render(DATA, PREV){
     const heatWarn = isAzure || DATA.engine === 'azure-mi' ? 30 : 10;
     const heatCrit = isAzure || DATA.engine === 'azure-mi' ? 100 : 20;
     const ioInterval = DATA.intervals?.file_io;
-    el('fileio-sub').textContent = `${ioInterval ? `Per-file interval latency (${Number(DATA.intervals.elapsedSeconds || 0).toFixed(1)}s; ${ioInterval.status}${ioInterval.reason ? ' / '+ioInterval.reason : ''})` : 'Per-file cumulative read/write stalls (since stats reset)'} — green <${heatWarn}ms, amber ${heatWarn}-${heatCrit}ms, red >${heatCrit}ms`;
+    el('fileio-sub').textContent = `${ioInterval ? `${DATA.historical ? 'Recorded' : 'Per-file'} interval latency (${Number(DATA.intervals.elapsedSeconds || 0).toFixed(1)}s; ${ioInterval.status}${ioInterval.reason ? ' / '+ioInterval.reason : ''})` : 'Per-file cumulative read/write stalls (since stats reset)'} — green <${heatWarn}ms, amber ${heatWarn}-${heatCrit}ms, red >${heatCrit}ms`;
     const heat = (ms)=>{
       if(ms==null) return "";
       if(ms<heatWarn) return "background:rgba(22,163,74,0.15);color:var(--cp-success);";
@@ -2505,9 +2570,9 @@ function render(DATA, PREV){
           ? '<span class="pill muted" title="Service-managed backup history is not exposed by this sample">service-managed</span>'
           : !d.last_full_backup
         ? '<span class="pill crit">never</span>'
-        : ((Date.now()-new Date(d.last_full_backup).getTime())/86400000 > 7
-            ? `<span class="pill warn">${ago(d.last_full_backup)}</span>`
-            : `<span class="pill ok">${ago(d.last_full_backup)}</span>`);
+        : (((DATA.historical ? Date.parse(DATA.generated_at) : Date.now())-new Date(d.last_full_backup).getTime())/86400000 > 7
+            ? `<span class="pill warn" title="${esc(d.last_full_backup)}">${ago(d.last_full_backup, DATA.historical ? Date.parse(DATA.generated_at) : Date.now())}</span>`
+            : `<span class="pill ok" title="${esc(d.last_full_backup)}">${ago(d.last_full_backup, DATA.historical ? Date.parse(DATA.generated_at) : Date.now())}</span>`);
       return `<tr>
         <td><b>${esc(d.name)}</b></td>
         <td><span class="dbstate-${esc(d.state)}">${esc(d.state)}</span></td>
@@ -2526,8 +2591,8 @@ function render(DATA, PREV){
     } else {
       el('missing-idx').innerHTML = `<div class="scroll"><table>
         <thead><tr><th>DB / Table</th><th class="num">Impact</th><th class="num">Score</th><th>Columns</th></tr></thead>
-        <tbody>${mi.map((m,idx)=>`<tr class="clickable" data-qtype="index" data-idx="${idx}">
-          <td><b>${esc(m.db_name)}</b>.${esc(m.schema_name)}.${esc(m.table_name)}</td>
+        <tbody>${mi.map((m,idx)=>`<tr${!DATA.historical || DATA.captureConsent?.includeSqlText ? ' class="clickable"' : ''} data-qtype="index" data-idx="${idx}">
+          <td><b>${esc(m.db_name)}</b>${m.table_name ? '.'+esc(m.schema_name)+'.'+esc(m.table_name) : ' · schema not retained (SQL text opt-in)'}</td>
           <td class="num">${fmtInt(m.user_impact_count)}</td>
           <td class="num"><span class="pill">${fmtInt(m.improvement_score)}</span></td>
           <td class="mono" style="font-size:11px;">${esc([m.eq_cols,m.ineq_cols].filter(Boolean).join(', '))}${m.included_cols?' <span style="color:var(--cp-text-soft)">INCLUDE ('+esc(m.included_cols)+')</span>':''}</td>
@@ -2576,8 +2641,8 @@ function render(DATA, PREV){
           <td>${a.blocked_by?`<span class="pill crit">${a.blocked_by}</span>`:'-'}</td>
           <td><div class="query-text" title="${esc(a.query_text||'')}">${esc(a.query_text||'')}</div></td>
           <td style="white-space:nowrap;">
-            ${a.plan_handle_hex && a.plan_handle_hex !== '0x' ? `<button class="btn ghost view-plan" data-plan="${esc(a.plan_handle_hex)}" data-spid="${esc(a.session_id)}" style="padding:2px 8px;font-size:11px;" title="Show live execution plan">📄</button>` : ''}
-            <button class="btn ghost" data-kill="${esc(a.session_id)}" style="padding:2px 8px;font-size:11px;color:var(--cp-danger);" title="KILL this session">☠</button>
+            ${!DATA.historical && a.plan_handle_hex && a.plan_handle_hex !== '0x' ? `<button class="btn ghost view-plan" data-plan="${esc(a.plan_handle_hex)}" data-spid="${esc(a.session_id)}" style="padding:2px 8px;font-size:11px;" title="Show live execution plan">📄</button>` : ''}
+            ${DATA.historical ? `<span title="${a.plan_handle_hex ? 'Recorded plan handle: '+esc(a.plan_handle_hex)+'. XML was not included in this performance sample; see opted-in incident evidence.' : 'Plan XML not retained in this performance sample. Historical mode never queries or kills a live session.'}">Recorded only</span>` : `<button class="btn ghost" data-kill="${esc(a.session_id)}" style="padding:2px 8px;font-size:11px;color:var(--cp-danger);" title="KILL this session">☠</button>`}
           </td>
         </tr>`).join('')}</tbody></table></div>`;
       el('active').querySelectorAll('.view-plan').forEach(b => {
@@ -2585,8 +2650,10 @@ function render(DATA, PREV){
       });
       el('active').querySelectorAll('[data-kill]').forEach(b => {
         b.addEventListener('click', async () => {
+          if (historyController?.isHistorical()) return;
           const spid = b.dataset.kill;
           if (!(await confirmDialog(`KILL session ${spid}?`, 'This immediately terminates the session on the SQL Server. Any uncommitted work is rolled back.'))) return;
+          if (historyController?.isHistorical()) return;
           const r = await fetch('/api/kill-session', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({serverId: activeServerId, sessionId: Number(spid)})});
           const d = await r.json();
           if (!r.ok) { alert('Kill failed: ' + (d.error || 'unknown')); return; }
@@ -2614,7 +2681,7 @@ function render(DATA, PREV){
     }
 
     // === Blocking chain ===
-    renderBlockingChain(DATA.blocking || []);
+    renderBlockingChain(DATA.blocking || [], DATA.historical);
 
     // === Waiting Tasks with plan ===
     const wt = DATA.waiters || [];
@@ -2643,7 +2710,7 @@ function render(DATA, PREV){
           <td class="mono" title="${esc(w.resource_description||'')}">${esc(w.resource_description||'')}</td>
           <td>${esc(w.login_name||'')}<div class="mono" style="font-size:10px;color:var(--cp-text-soft);">${esc(w.host_name||'')}</div></td>
           <td><div class="query-text" title="${esc(w.query_text||'')}">${esc(w.query_text||'')}</div></td>
-          <td style="text-align:center;white-space:nowrap;">${w.plan_handle_hex && w.plan_handle_hex !== '0x' ? `<button class="btn ghost view-plan" data-plan="${esc(w.plan_handle_hex)}" data-spid="${esc(w.session_id)}" style="padding:2px 10px;font-size:13px;" title="Show live execution plan">📄</button>` : '<span style="color:var(--cp-text-soft);">—</span>'}</td>
+          <td style="text-align:center;white-space:nowrap;">${!DATA.historical && w.plan_handle_hex && w.plan_handle_hex !== '0x' ? `<button class="btn ghost view-plan" data-plan="${esc(w.plan_handle_hex)}" data-spid="${esc(w.session_id)}" style="padding:2px 10px;font-size:13px;" title="Show live execution plan">📄</button>` : `<span title="${DATA.historical && w.plan_handle_hex ? 'Recorded plan handle: '+esc(w.plan_handle_hex)+'. XML was not included in this performance sample; see opted-in incident evidence.' : 'Historical plans require explicitly retained incident evidence; no live lookup'}">${DATA.historical && w.plan_handle_hex ? 'Plan identity only' : '—'}</span>`}</td>
         </tr>`).join('')}</tbody></table></div>`;
       el('waiters').querySelectorAll('.view-plan').forEach(b => {
         b.addEventListener('click', () => openLivePlan(b.dataset.plan, b.dataset.spid));
@@ -2651,7 +2718,33 @@ function render(DATA, PREV){
     }
     updateDetailActions(DATA);
     renderSectionFreshness(DATA);
-    countersController?.refreshSamples();
+    if (DATA.historical) {
+      el('health-label').textContent = 'Historical';
+      el('health-popover').textContent = 'Historical data — not live. Health is not a current availability assessment.';
+      el('current-server-sub').textContent = 'Historical data — not live · ' + (DATA.generated_at ? 'Sample / aggregation: '+fmtDate(DATA.generated_at) : 'No stored sample at selected time') + ` · ${i.server_name || ''} · ${i.edition || ''} v${i.product_version || '?'}`;
+      el('narrative').textContent = 'Historical values only; ages are relative to this sample. Missing measurements are unavailable, not zero. Database/file labels are retained locally. SQL/schema details require the SQL text opt-in; plan XML requires optional incident plan retention. Login/host identities are omitted. Section source times may precede this snapshot.' +
+        (Object.keys(DATA.truncation || {}).length ? ' Capture truncated: '+Object.entries(DATA.truncation).map(([key,n]) => `${key}: ${n} rows omitted`).join('; ') : '');
+      if (!DATA.generated_at) el('timeline').innerHTML = '<div class="empty">No sample at this selected time. Move the time bar or choose another window.</div>';
+      if (DATA.tempdb && !['user_obj_mb','internal_obj_mb','version_store_mb','free_mb'].every(key => Number.isFinite(DATA.tempdb[key]))) {
+        el('tempdb').innerHTML = '<div class="empty">TempDB measurements incomplete in this sample; missing values are not zero.</div>';
+      }
+      for (const [section, id, columns] of [['waits','waits'], ['buffer_pool','buffer-donut'], ['file_io','file-io',6],
+        ['tempdb','tempdb'], ['databases','databases',8], ['top_queries','top-queries',9],
+        ['missing_indexes','missing-idx'], ['active','active'], ['blocking','blocking-tree'],
+        ['waiters','waiters'], ['latches','latches']]) {
+        if (!DATA.sectionMetadata[section]?.historicalUnavailable) continue;
+        const target = el(id);
+        const reason = esc(DATA.sectionMetadata[section]?.error || 'Unavailable in this historical sample — not retained.');
+        if (target) target.innerHTML = columns ? `<tr><td colspan="${columns}" class="empty">${reason}</td></tr>`
+          : `<div class="empty">${reason}</div>`;
+      }
+      el('blocking-card').style.display = '';
+      el('waiters-card').style.display = '';
+      if (Array.isArray(DATA.waiters) && !DATA.waiters.length) el('waiters').innerHTML = '<div class="empty">No waiting tasks at recorded sample.</div>';
+      if (Array.isArray(DATA.blocking) && !DATA.blocking.length) el('blocking-tree').innerHTML = '<div class="empty">No blocking at recorded sample.</div>';
+      el('buffer-card').classList.remove('disabled');
+      el('tempdb-card').classList.remove('disabled');
+    } else countersController?.refreshSamples();
   } catch(e){
     console.error('Render error:', e);
     el('err').textContent = `Render error: ${e.message}`;
@@ -2675,7 +2768,8 @@ document.addEventListener('keydown', e => {
   }
 });
 
-function closeDetail(){ el('detail-backdrop').classList.remove('show'); }
+let detailRequestEpoch = 0;
+function closeDetail(){ detailRequestEpoch++; el('detail-backdrop').classList.remove('show'); }
 function openDetail(title, sub, bodyHtml){
   el('detail-title').textContent = title;
   el('detail-sub').innerHTML = sub;
@@ -2703,10 +2797,13 @@ function openDetail(title, sub, bodyHtml){
 }
 
 async function openQueryDetail(db, qid){
+  if (historyController?.isHistorical()) return;
+  const pinned = activeServerId, epoch = ++detailRequestEpoch;
   openDetail(`Query ${qid} · ${db}`, `Loading full text and execution plan from Query Store…`, `<div class="skeleton" style="height:200px"></div>`);
   try {
     const r = await fetch(`/api/query-detail?serverId=${encodeURIComponent(activeServerId)}&db=${encodeURIComponent(db)}&queryId=${encodeURIComponent(qid)}`);
     const data = await r.json();
+    if (historyController?.isHistorical() || pinned !== activeServerId || epoch !== detailRequestEpoch) return;
     if(!r.ok) throw new Error(data.error||'Failed');
     const plans = data.plans||[];
     if(plans.length===0){ openDetail(`Query ${qid} · ${db}`, '', '<div class="empty">No plan found.</div>'); return; }
@@ -2775,11 +2872,12 @@ async function openQueryDetail(db, qid){
     openDetail(`Query ${qid} · ${db}`, sub, body);
     if (hasPlan) renderVisualPlan(planXml);
   } catch(e){
+    if (historyController?.isHistorical() || pinned !== activeServerId || epoch !== detailRequestEpoch) return;
     openDetail(`Query ${qid} · ${db}`, '', `<div class="error-banner show">Fetch failed: ${esc(e.message)}</div>`);
   }
 }
 
-function renderBlockingChain(rows) {
+function renderBlockingChain(rows, historical = false) {
   const card = el('blocking-card');
   if (!rows || rows.length === 0) { card.style.display = 'none'; return; }
   card.style.display = '';
@@ -2797,15 +2895,18 @@ function renderBlockingChain(rows) {
   const totalChain = rows.length;
   const heads = roots.length;
   el('blocking-sub').textContent = `${heads} head blocker${heads===1?'':'s'} · ${totalChain} session${totalChain===1?'':'s'} in the chain — top-level = the actual culprit`;
+  const visited = new Set();
   const renderNode = (n, depth) => {
+    if (visited.has(n.session_id)) return '';
+    visited.add(n.session_id);
     const isHead = !n.blocked_by || n.blocked_by === 0;
     const badge = isHead
       ? '<span class="pill crit" style="font-size:10px;">HEAD BLOCKER</span>'
       : `<span class="pill muted" style="font-size:10px;">blocked by ${n.blocked_by}</span>`;
-    const planBtn = (n.plan_handle_hex && n.plan_handle_hex !== '0x')
+    const planBtn = (!historical && n.plan_handle_hex && n.plan_handle_hex !== '0x')
       ? `<button class="btn ghost view-plan" data-plan="${esc(n.plan_handle_hex)}" data-spid="${esc(n.session_id)}" style="padding:2px 8px;font-size:11px;" title="Show live execution plan">📄 plan</button>`
       : '';
-    const killBtn = `<button class="btn ghost" data-kill-blk="${esc(n.session_id)}" style="padding:2px 8px;font-size:11px;color:var(--cp-danger);" title="KILL this session">☠ kill</button>`;
+    const killBtn = historical ? (n.plan_handle_hex ? `<span title="Recorded plan handle: ${esc(n.plan_handle_hex)}. XML requires retained incident evidence; no live lookup.">Plan identity only</span>` : '') : `<button class="btn ghost" data-kill-blk="${esc(n.session_id)}" style="padding:2px 8px;font-size:11px;color:var(--cp-danger);" title="KILL this session">☠ kill</button>`;
     let html = `<div style="margin-left:${depth*24}px;padding:8px 10px;border-left:${isHead?'3px solid var(--cp-danger)':'2px solid var(--cp-border)'};margin-bottom:6px;background:${isHead?'rgba(220,38,38,0.06)':'var(--cp-surface-soft)'};border-radius:6px;">
       <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:12px;">
         <span style="font-weight:600;font-family:Consolas,monospace;">SPID ${n.session_id}</span>
@@ -2822,14 +2923,16 @@ function renderBlockingChain(rows) {
     for (const c of n.children) html += renderNode(c, depth + 1);
     return html;
   };
-  el('blocking-tree').innerHTML = roots.map(r => renderNode(r, 0)).join('');
+  el('blocking-tree').innerHTML = [...roots, ...nodes.values()].map(r => renderNode(r, 0)).join('');
   el('blocking-tree').querySelectorAll('.view-plan').forEach(b => {
     b.addEventListener('click', () => openLivePlan(b.dataset.plan, b.dataset.spid));
   });
   el('blocking-tree').querySelectorAll('[data-kill-blk]').forEach(b => {
     b.addEventListener('click', async () => {
+      if (historyController?.isHistorical()) return;
       const spid = b.dataset.killBlk;
       if (!(await confirmDialog(`KILL session ${spid}?`, 'This immediately terminates the session on the SQL Server. Any uncommitted work is rolled back.'))) return;
+      if (historyController?.isHistorical()) return;
       const r = await fetch('/api/kill-session', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({serverId: activeServerId, sessionId: Number(spid)})});
       const d = await r.json();
       if (!r.ok) { alert('Kill failed: ' + (d.error || 'unknown')); return; }
@@ -2839,10 +2942,13 @@ function renderBlockingChain(rows) {
 }
 
 async function openLivePlan(planHandleHex, spid) {
+  if (historyController?.isHistorical()) return;
+  const pinned = activeServerId, epoch = ++detailRequestEpoch;
   openDetail(`Live plan · SPID ${spid}`, 'Fetching plan from sys.dm_exec_query_plan…', `<div class="skeleton" style="height:400px;"></div>`);
   try {
     const r = await fetch('/api/live-plan', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({serverId: activeServerId, planHandleHex}) });
     const data = await r.json();
+    if (historyController?.isHistorical() || pinned !== activeServerId || epoch !== detailRequestEpoch) return;
     if (!r.ok) throw new Error(data.error || ('HTTP ' + r.status));
     openDetail(`Live plan · SPID ${spid}`, `Plan handle: ${esc(planHandleHex.slice(0,40))}…`, `
       <div id="plan-visual-toolbar" style="display:flex;gap:8px;margin-bottom:8px;align-items:center;">
@@ -2857,6 +2963,7 @@ async function openLivePlan(planHandleHex, spid) {
     `);
     renderVisualPlan(data.xml);
   } catch (e) {
+    if (historyController?.isHistorical() || pinned !== activeServerId || epoch !== detailRequestEpoch) return;
     openDetail(`Live plan · SPID ${spid}`, '', `<div class="error-banner show">Failed to fetch live plan: ${esc(e.message)}</div>`);
   }
 }
@@ -2953,6 +3060,8 @@ async function renderVisualPlan(xml){
 }
 
 function openIndexDetail(m){
+  if (historyController?.isHistorical() && (!historicalFrame?.captureConsent?.includeSqlText ||
+      !historicalFrame.missing_indexes?.includes(m))) return;
   const idxName = generateIndexName(m);
   const eqCols = (m.eq_cols||'').replace(/[\[\]]/g,'').split(',').map(s=>s.trim()).filter(Boolean);
   const ineqCols = (m.ineq_cols||'').replace(/[\[\]]/g,'').split(',').map(s=>s.trim()).filter(Boolean);
@@ -3024,7 +3133,9 @@ WHERE s.database_id = DB_ID() AND i.name = '${idxName}';`;
       </div>
     </div>
   `;
-  openDetail(`Missing Index · ${m.schema_name}.${m.table_name}`, `Auto-generated CREATE INDEX statement · review carefully before applying`, body);
+  openDetail(`Missing Index · ${m.schema_name}.${m.table_name}`, historyController?.isHistorical()
+    ? `Captured suggestion · ${esc(historicalFrame.sectionMetadata?.missing_indexes?.sampledAt || historicalFrame.generated_at)} · generated locally from recorded fields; review before applying`
+    : `Auto-generated CREATE INDEX statement · review carefully before applying`, body);
 }
 
 function generateIndexName(m){
@@ -3037,7 +3148,7 @@ function generateIndexName(m){
 
 // Countdown is scoped to the current view or selected server.
 setInterval(()=>{
-  if(currentViewPaused() || document.hidden || !dashboardStarted || pauseUpdates.has(activeServerId)) return;
+  if(historyController?.isHistorical() || currentViewPaused() || document.hidden || !dashboardStarted || pauseUpdates.has(activeServerId)) return;
   countdown--;
   el('countdown').textContent = formatCountdown(Math.max(0,countdown));
   const dashLen = 2 * Math.PI * 18;

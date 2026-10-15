@@ -205,6 +205,7 @@ test('detail requests never run in overview or hidden tabs and stale view respon
   const elements = new Map();
   const context = vm.createContext({
     AbortController, document: { hidden: false },
+    historyController: null,
     fetch: (url, options) => { const request = { url, options, ...deferred() }; requests.push(request); return request.promise; },
     el: id => { if (!elements.has(id)) elements.set(id, { classList: { add() {}, remove() {} } }); return elements.get(id); },
     render: data => rendered.push(data.server_id), renderServerList() {}, setStatus() {},
@@ -277,7 +278,7 @@ test('server pause controls are persistent and scoped while overview pause is ex
   assert.match(html, /View paused · background monitoring unchanged/);
   assert.match(html, /'Read cached sample' : 'Refresh now'/);
   assert.match(html, /Read the last collected sample without running SQL/);
-  assert.match(html, /if\(currentViewPaused\(\) \|\| document\.hidden/);
+  assert.match(html, /if\(historyController\?\.isHistorical\(\) \|\| currentViewPaused\(\) \|\| document\.hidden/);
   assert.match(html, /fleetHelpers\?\.pausedBadge\(s\)/);
   assert.match(html, /fleetHelpers\.pausedBadge\(cur\)/);
 });

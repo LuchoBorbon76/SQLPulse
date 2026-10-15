@@ -230,8 +230,10 @@ export function createAzureSqlAuth({ execFileImpl = execFile, platform = process
     return { tenant: active.tenant };
   }
 
-  async function ensure(cfg, allowLogin, options) {
-    try { return await check(cfg, options); }
+  async function ensure(cfg, allowLogin, options, forceLogin) {
+    try {
+      if (!forceLogin) return await check(cfg, options);
+    }
     catch (error) {
       if (!['AZ_SESSION', 'AZ_IDENTITY'].includes(error.code)) throw error;
       if (!allowLogin) {
@@ -252,7 +254,7 @@ export function createAzureSqlAuth({ execFileImpl = execFile, platform = process
     return check(cfg, options);
   }
 
-  function withSession(cfg, operation, { allowLogin = false, signal, onProgress } = {}) {
+  function withSession(cfg, operation, { allowLogin = false, forceLogin = false, signal, onProgress } = {}) {
     const options = { signal, onProgress };
     if (!['azuread-interactive', 'azuread-integrated'].includes(cfg.auth)) return Promise.resolve().then(() => {
       throwIfConnectionAborted(signal);
@@ -264,7 +266,8 @@ export function createAzureSqlAuth({ execFileImpl = execFile, platform = process
     const work = queue.then(async () => {
       throwIfConnectionAborted(signal);
       started = true;
-      const session = await ensure(cfg, allowLogin && cfg.auth === 'azuread-interactive', options);
+      const interactive = allowLogin && cfg.auth === 'azuread-interactive';
+      const session = await ensure(cfg, interactive, options, interactive && forceLogin);
       throwIfConnectionAborted(signal);
       return operation(session);
     });

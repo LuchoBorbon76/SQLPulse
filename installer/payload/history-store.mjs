@@ -2,6 +2,9 @@ import path from 'node:path';
 import { mkdir, open, readFile, readdir, stat } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { atomicWriteFile, createJsonStore } from './storage.mjs';
+import { sanitizeVisual } from './history-visual.mjs';
+export { HISTORY_VISUAL_FIELDS } from './history-visual.mjs';
+export const sanitizeHistoryVisual = sanitizeVisual;
 
 const HOUR = 3600000, DAY = 24 * HOUR, MAX_RANGE = 90 * DAY;
 const CORE = ['ple', 'bhr', 'memMb', 'sessions', 'active', 'blocked', 'waitS', 'signalPct', 'cpuPct', 'memPct', 'ioPct', 'logPct'];
@@ -73,6 +76,85 @@ function numericMap(value, maximum = 40) {
   return result;
 }
 
+const VISUAL_INSTANCE = ['page_life_expectancy', 'memory_in_use_mb', 'target_memory_mb', 'physical_memory_mb',
+  'user_sessions', 'connections', 'active_requests', 'blocked_requests', 'cpu_count', 'uptime_min',
+  'engine_edition', 'avg_cpu_percent', 'avg_memory_percent', 'avg_data_io_percent', 'avg_log_write_percent',
+  'buffer_cache_hit_ratio', 'buffer_cache_hit_ratio_base'];
+const WAIT_TYPES = new Set(('PAGEIOLATCH_SH PAGEIOLATCH_EX WRITELOG RESOURCE_SEMAPHORE CXPACKET CXCONSUMER ' +
+  'ASYNC_NETWORK_IO SOS_SCHEDULER_YIELD THREADPOOL LCK_M_S LCK_M_X LCK_M_U LCK_M_IS LCK_M_IX ' +
+  'PAGELATCH_SH PAGELATCH_EX IO_COMPLETION ASYNC_IO_COMPLETION BACKUPIO BACKUPBUFFER LOGBUFFER ' +
+  'HADR_SYNC_COMMIT HADR_DATABASE_FLOW_CONTROL HADR_LOGCAPTURE_SYNC PREEMPTIVE_OS_AUTHENTICATIONOPS').split(' '));
+const numericFields = (source, keys) => Object.fromEntries(keys.filter(key => finite(source?.[key])).map(key => [key, source[key]]));
+
+// Raw visual detail is deliberately lossy: never retain SQL/plans, identities, names or paths.
+// Fixed schemas and row limits bound each sample; old numeric-only samples remain valid.
+function sanitizeLegacyHistoryVisual(data) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+  const result = { instance: numericFields(data.instance, VISUAL_INSTANCE) };
+  if (['onprem', 'azure-sqldb', 'azure-mi'].includes(data.engine)) result.engine = data.engine;
+  if (data.sectionMetadata && typeof data.sectionMetadata === 'object') {
+    result.sectionMetadata = {};
+    for (const key of ['waits', 'blocking', 'top_queries', 'buffer_pool', 'file_io', 'tempdb']) {
+      const metadata = data.sectionMetadata[key];
+      if (!metadata || typeof metadata !== 'object') continue;
+      const sampled = typeof metadata.sampledAt === 'number' ? metadata.sampledAt : Date.parse(metadata.sampledAt);
+      result.sectionMetadata[key] = {
+        status: metadata.applicable === false ? 'unsupported' : metadata.stale ? 'stale' : metadata.error ?
+          /permission|denied|not authorized|VIEW .* STATE/i.test(String(metadata.error)) ? 'permission-denied' : 'error' :
+          ['recorded', 'stale', 'error', 'permission-denied', 'unsupported', 'unavailable'].includes(metadata.status) ? metadata.status : 'recorded',
+        sampledAt: Number.isSafeInteger(sampled) && sampled >= 0 && sampled <= 8640000000000000 ? new Date(sampled).toISOString() : null,
+      };
+    }
+  }
+  const usable = key => !data.sectionMetadata?.[key]?.stale && !data.sectionMetadata?.[key]?.error &&
+    data.sectionMetadata?.[key]?.applicable !== false &&
+    !['stale', 'error', 'permission-denied', 'unsupported', 'unavailable'].includes(data.sectionMetadata?.[key]?.status);
+  if (usable('waits') && Array.isArray(data.waits)) {
+    result.waits = data.waits.slice(0, 12).map(row => ({
+      wait_type: WAIT_TYPES.has(row?.wait_type) ? row.wait_type : 'OTHER_RETAINED_WAIT',
+      ...numericFields(row, ['wait_time_s', 'signal_wait_s', 'tasks', 'avg_wait_ms']),
+    }));
+  }
+  if (usable('buffer_pool') && Array.isArray(data.buffer_pool)) {
+    result.buffer_pool = data.buffer_pool.slice(0, 12).map((row, index) => ({
+      db_name: `Database ${index + 1}`, ...numericFields(row, ['buffer_mb']),
+    }));
+  }
+  if (usable('file_io') && Array.isArray(data.file_io)) {
+    result.file_io = data.file_io.slice(0, 12).map((row, index) => ({
+      db_name: `Database/file ${index + 1}`, logical_name: `File ${index + 1}`,
+      ...numericFields(row, ['size_mb', 'avg_read_latency_ms', 'avg_write_latency_ms']),
+    }));
+  }
+  if (usable('top_queries') && Array.isArray(data.top_queries)) {
+    result.top_queries = data.top_queries.slice(0, 12).map((row, index) => ({
+      db_name: `Database ${index + 1}`,
+      ...numericFields(row, ['query_id', 'execs', 'total_cpu_ms', 'avg_cpu_ms', 'avg_dur_ms', 'avg_reads']),
+    }));
+  }
+  if (data.intervals && typeof data.intervals === 'object') {
+    result.intervals = numericFields(data.intervals, ['elapsedSeconds']);
+    if (data.intervals.waits?.status === 'ready' && Array.isArray(data.intervals.waits.rows)) {
+      result.intervals.waits = { status: 'ready', rows: data.intervals.waits.rows.slice(0, 12).map(row => ({
+        wait_type: WAIT_TYPES.has(row?.wait_type) ? row.wait_type : 'OTHER_RETAINED_WAIT',
+        ...numericFields(row, ['wait_time_s', 'signal_wait_s', 'tasks', 'avg_wait_ms']),
+      })) };
+    } else if (['unavailable', 'warming-up', 'reset', 'gap', 'stale'].includes(data.intervals.waits?.status)) {
+      result.intervals.waits = { status: data.intervals.waits.status };
+    }
+    if (data.intervals.file_io?.status === 'ready' && Array.isArray(data.intervals.file_io.rows)) {
+      result.intervals.file_io = { status: 'ready', rows: data.intervals.file_io.rows.slice(0, 12).map((row, index) => ({
+        db_name: `Database/file ${index + 1}`, logical_name: `File ${index + 1}`,
+        ...numericFields(row, ['avg_read_latency_ms', 'avg_write_latency_ms', 'read_iops', 'write_iops']),
+      })) };
+    }
+  }
+  if (usable('tempdb') && data.tempdb && typeof data.tempdb === 'object' && !Array.isArray(data.tempdb)) {
+    result.tempdb = numericFields(data.tempdb, ['user_obj_mb', 'internal_obj_mb', 'version_store_mb', 'free_mb']);
+  }
+  return result;
+}
+
 export function sanitizeHistorySample(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw fail('History sample must be an object.');
   const sample = { t: timestamp(value.t ?? value.generated_at, 'timestamp') };
@@ -83,6 +165,8 @@ export function sanitizeHistorySample(value) {
   }
   if (value.gap === true) sample.gap = true;
   if (value.reset === true || value.counterReset === true) sample.reset = true;
+  if (value.visual) sample.visual = value.visual.coverageVersion === 2
+    ? sanitizeHistoryVisual(value.visual, value.visual.captureConsent) : sanitizeLegacyHistoryVisual(value.visual);
   return sample;
 }
 
@@ -272,8 +356,8 @@ function boundedPoints(points, limit) {
 }
 
 export function createHistoryStore({
-  dataDir, now = Date.now, serializeSample, storeFactory = createJsonStore,
-  retentionDays = 30, rawRetentionDays = 7, maxRawPoints = 25000, maxRollupPoints = 2160,
+  dataDir, now = Date.now, serializeSample, storeFactory = createJsonStore, getCaptureConsent = async () => ({}),
+  retentionDays = 7, rawRetentionDays = retentionDays, maxRawPoints = 25000, maxRollupPoints = 2160,
   maxBytesPerServer = 32 * 1024 * 1024, gapThresholdMs = 180000,
   checkpointEverySamples = 128, checkpointIntervalMs = HOUR, maxJournalBytes = 1024 * 1024, maxCachedServers = 4,
 } = {}) {
@@ -289,7 +373,7 @@ export function createHistoryStore({
   function validateConfig(value) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw fail('Invalid history retention settings.');
     integer(value.retentionDays, 'retentionDays', 1, 90);
-    integer(value.rawRetentionDays, 'rawRetentionDays', 1, 7);
+    integer(value.rawRetentionDays, 'rawRetentionDays', 1, 90);
     if (Number(value.rawRetentionDays) > Number(value.retentionDays)) throw fail('Raw retention cannot exceed total retention.');
     return true;
   }
@@ -325,7 +409,7 @@ export function createHistoryStore({
     const removedRaw = state.raw.filter(point => point.t >= rawCutoff);
     state.droppedRawPoints += Math.max(0, removedRaw.length - maxRawPoints);
     state.raw = removedRaw.slice(-maxRawPoints);
-    const hours = state.hours.filter(point => point.lastT >= cutoff);
+    const hours = state.hours.filter(point => point.firstT >= cutoff);
     state.droppedHours += Math.max(0, hours.length - maxRollupPoints);
     state.hours = hours.slice(-maxRollupPoints);
     // Size is bounded independently of collection cadence and metric count.
@@ -412,7 +496,8 @@ export function createHistoryStore({
     state.checkpointAt ??= timestamp(now(), 'clock');
     state.persistence ??= emptyCosts();
     state.recoveryWarnings ??= [];
-    const entry = { state, files, pendingRecords: 0, tornTail: false, needsReset: false, pruned: false, duplicateAppends: 0, replayedRecords: 0 };
+    const entry = { state, files, pendingRecords: 0, tornTail: false, needsReset: false, pruned: false,
+      duplicateAppends: previous?.duplicateAppends || 0, replayedRecords: 0 };
     if (!state.migrated) {
       for (const sample of await legacy(id)) {
         addHour(state, sample, gapThresholdMs); state.raw.push(sample);
@@ -535,7 +620,37 @@ export function createHistoryStore({
   async function query(id, options = {}) {
     idChecked(id);
     const checked = optionsChecked(options);
-    return withEntry(id, (entry, cfg) => ({ serverId: id, ...select(entry.state, cfg, checked) }));
+    const consent = await getCaptureConsent();
+    return withEntry(id, (entry, cfg) => {
+      const window = select(entry.state, cfg, checked);
+      for (const point of window.points) {
+        if (options.includeVisual === false) delete point.visual;
+        else if (point.visual?.coverageVersion === 2) point.visual = sanitizeHistoryVisual(point.visual, {
+          includeSqlText: consent.includeSqlText === true && point.visual.captureConsent.includeSqlText,
+          retainPlans: consent.retainPlans === true && point.visual.captureConsent.retainPlans,
+        });
+      }
+      return { serverId: id, ...window };
+    });
+  }
+  async function detail(id, options = {}) {
+    idChecked(id);
+    const checked = optionsChecked(options), at = timestamp(options.at, 'cursor');
+    if (at < checked.from || at >= checked.to) throw fail('History cursor must be within the selected window.');
+    const consent = await getCaptureConsent();
+    return withEntry(id, (entry, cfg) => {
+      const cutoff = Math.max(checked.from, now() - Math.min(cfg.retentionDays, cfg.rawRetentionDays) * DAY);
+      const raw = entry.state.raw.findLast(point => point.t >= cutoff && point.t <= at && point.t < checked.to);
+      const valid = raw && at - raw.t <= Math.min(gapThresholdMs, 180000);
+      const point = valid ? { ...structuredClone(raw), resolution: 'raw' } : null;
+      if (point?.visual?.coverageVersion === 2) point.visual = sanitizeHistoryVisual(point.visual, {
+        includeSqlText: consent.includeSqlText === true && point.visual.captureConsent.includeSqlText,
+        retainPlans: consent.retainPlans === true && point.visual.captureConsent.retainPlans,
+      });
+      return { serverId: id, from: checked.from, to: checked.to, at, point,
+        reason: point ? point.visual ? 'recorded' : 'old-format' : 'gap-or-raw-expired',
+        recoveryWarnings: structuredClone(entry.state.recoveryWarnings || []) };
+    });
   }
   async function latest(id, limit = 720) {
     idChecked(id);
@@ -543,6 +658,7 @@ export function createHistoryStore({
     return withEntry(id, (entry, cfg) => {
       const cutoff = now() - Math.min(cfg.retentionDays, cfg.rawRetentionDays) * DAY;
       const points = entry.state.raw.filter(point => point.t >= cutoff).slice(-limit).map(point => structuredClone(point));
+      for (const point of points) delete point.visual;
       for (let index = 1; index < points.length; index++) if (points[index].t - points[index - 1].t > gapThresholdMs) points[index].gap = true;
       return points;
     });
@@ -550,7 +666,13 @@ export function createHistoryStore({
   async function append(id, data) {
     idChecked(id);
     const source = data?.t !== undefined ? data : serializeSample ? serializeSample(data) : snapshotSample(data);
-    const sample = sanitizeHistorySample(source);
+    let sample = sanitizeHistorySample(source);
+    const consent = await getCaptureConsent();
+    if (data?.t === undefined) sample.visual = sanitizeHistoryVisual(data, consent);
+    else if (sample.visual?.coverageVersion === 2) sample.visual = sanitizeHistoryVisual(sample.visual, {
+      includeSqlText: consent.includeSqlText === true && sample.visual.captureConsent.includeSqlText,
+      retainPlans: consent.retainPlans === true && sample.visual.captureConsent.retainPlans,
+    });
     // Collector interval rows can include database/file names. Persist only approved numeric totals.
     const interval = numericMap({
       ...(sample.intervalMetrics ? {} : extractIntervalHistoryMetrics(data?.intervals)), ...sample.intervalMetrics,
@@ -564,8 +686,23 @@ export function createHistoryStore({
           return resetReason(section?.reason) || Array.isArray(section?.rows) && section.rows.some(row => resetReason(row?.reason));
         })) sample.reset = true;
     if (sample.t > now() + 5 * 60000) throw fail('History sample timestamp is in the future.');
+    sample = sanitizeHistorySample(sample);
     return withEntry(id, async (entry, cfg) => {
       const state = entry.state;
+      // Recheck inside the serialized append: a queued pre-revocation capture
+      // must not reintroduce evidence after the revocation checkpoint.
+      if (sample.visual?.coverageVersion === 2) {
+        const currentConsent = await getCaptureConsent();
+        sample.visual = sanitizeHistoryVisual(sample.visual, {
+          includeSqlText: currentConsent.includeSqlText === true && sample.visual.captureConsent.includeSqlText,
+          retainPlans: currentConsent.retainPlans === true && sample.visual.captureConsent.retainPlans,
+        });
+      }
+      const previousIdentity = state.raw.findLast(point => point.t < sample.t)?.visual?.datasetIdentity;
+      if (sample.visual?.datasetIdentity && previousIdentity && previousIdentity !== sample.visual.datasetIdentity) {
+        sample.gap = true; sample.reset = true;
+        sample = sanitizeHistorySample(sample);
+      }
       if (!applySample(state, sample, false)) {
         entry.duplicateAppends++;
         return { serverId: id, appended: false, t: sample.t };
@@ -604,6 +741,7 @@ export function createHistoryStore({
       const state = entry.state;
       const window = select(state, cfg, { ...checked, limit: 2000 });
       const base = select(state, cfg, { ...checked, from: checked.from - shift, to: checked.to - shift, limit: 2000 });
+      for (const point of [...window.points, ...base.points]) delete point.visual;
       const currentStats = aggregate(window.points), baselineStats = aggregate(base.points), result = {};
       for (const key of new Set([...Object.keys(currentStats), ...Object.keys(baselineStats)])) {
         const current = currentStats[key], old = baselineStats[key];
@@ -624,10 +762,14 @@ export function createHistoryStore({
   }
   async function context(id, options = {}) {
     const window = await query(id, { ...options, limit: Math.min(integer(options.limit ?? 120, 'History context limit', 2, 2000), 120) });
-    const safePoints = points => points.map(point => ({
-      ...sanitizeHistorySample(point), ...(point.count ? { count: point.count } : {}),
-      ...(point.firstT !== undefined ? { firstT: point.firstT, lastT: point.lastT } : {}),
-    }));
+    const safePoints = points => points.map(point => {
+      const sample = sanitizeHistorySample(point);
+      delete sample.visual;
+      return {
+        ...sample, ...(point.count ? { count: point.count } : {}),
+        ...(point.firstT !== undefined ? { firstT: point.firstT, lastT: point.lastT } : {}),
+      };
+    });
     let points = window.points;
     const selected = {
       scope: 'history', serverId: id, from: window.from, to: window.to, resolution: window.resolution,
@@ -702,6 +844,9 @@ export function createHistoryStore({
     await transaction(settingsFile, async () => {
       const current = await settings.read();
       const value = { ...current, ...changes };
+      if (changes.retentionDays !== undefined && changes.rawRetentionDays === undefined) {
+        value.rawRetentionDays = changes.retentionDays;
+      }
       validateConfig(value);
       const cfg = { retentionDays: Number(value.retentionDays), rawRetentionDays: Number(value.rawRetentionDays) };
       if (!(await fileInfo(settingsFile)).stamp || Number(current.retentionDays) !== cfg.retentionDays || Number(current.rawRetentionDays) !== cfg.rawRetentionDays) await settings.write(cfg);
@@ -709,5 +854,19 @@ export function createHistoryStore({
     await maintenance();
     return status();
   }
-  return { append, latest, query, compare, context, status, configure, maintenance, prune: maintenance };
+  async function redactEvidence() {
+    const consent = await getCaptureConsent();
+    for (const id of await ids()) await withEntry(id, async (entry, cfg) => {
+      let changed = false;
+      for (const point of entry.state.raw) if (point.visual?.coverageVersion === 2) {
+        const visual = sanitizeHistoryVisual(point.visual, {
+          includeSqlText: consent.includeSqlText === true && point.visual.captureConsent.includeSqlText,
+          retainPlans: consent.retainPlans === true && point.visual.captureConsent.retainPlans,
+        });
+        if (JSON.stringify(visual) !== JSON.stringify(point.visual)) { point.visual = visual; changed = true; }
+      }
+      if (changed) await checkpoint(id, entry, cfg);
+    });
+  }
+  return { append, latest, query, detail, compare, context, status, configure, maintenance, redactEvidence, prune: maintenance };
 }

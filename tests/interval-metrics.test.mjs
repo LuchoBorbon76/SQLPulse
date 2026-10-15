@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import { createIntervalMetrics } from '../interval-metrics.mjs';
-import { createSectionCache } from '../collector-cache.mjs';
+import { createSectionCache, connectionIdentity } from '../collector-cache.mjs';
 import { computeHealth } from '../health.js';
 import { counterTemplatesFor } from '../counter-templates.js';
 
@@ -296,7 +296,7 @@ test('actual collectFor timestamps core sampling before slow ancillaries and ret
   }
   const calls = [], tracker = createIntervalMetrics();
   const context = {
-    Date: FakeDate, WAIT_EXCLUDES: "'SLEEP_TASK'",
+    Date: FakeDate, WAIT_EXCLUDES: "'SLEEP_TASK'", connectionIdentity,
     sectionCollector: createSectionCache({ now: () => clock }), deriveIntervalMetrics: tracker.sample,
     isAzureDbLike: () => false, isAzureSqlDb: () => false, isAzureManagedInstance: () => false,
     redactSqlDiagnostic: value => value,

@@ -4,11 +4,11 @@
     One-shot script to push this repo to GitHub under the LuchoBorbon76 account.
 
 .DESCRIPTION
-    Initializes git, commits, and pushes to https://github.com/LuchoBorbon76/SQLDashboard.
+    Initializes git, commits, and pushes to https://github.com/LuchoBorbon76/SQLPulse.
     You'll be prompted to sign in to GitHub in a browser (via Git Credential Manager) the first time.
 
 .PARAMETER RepoName
-    GitHub repository name (default: SQLDashboard)
+    GitHub repository name (default: SQLPulse)
 
 .PARAMETER GitHubUser
     GitHub username (default: LuchoBorbon76)
@@ -21,7 +21,7 @@
     .\Push-ToGitHub.ps1 -Private
 #>
 param(
-    [string]$RepoName    = 'SQLDashboard',
+    [string]$RepoName    = 'SQLPulse',
     [string]$GitHubUser  = 'LuchoBorbon76',
     [switch]$Private
 )

@@ -126,9 +126,9 @@ test('deadlock collection reads existing ring buffer, deduplicates persisted eve
   await restarted.close();
 });
 
-test('deadlock text opt-in retains bounded XML, and Azure SQL Database is explicitly unavailable without SQL reads', async t => {
+test('separate deadlock XML opt-in retains bounded XML, and Azure SQL Database is explicitly unavailable without SQL reads', async t => {
   const { service, calls } = await fixture(t, async () => [deadlock]);
-  await service.configure({ enabled: true, deadlocks: true, includeSqlText: true, maxTextChars: 300 });
+  await service.configure({ enabled: true, deadlocks: true, includeDeadlockXml: true, maxTextChars: 300 });
   await service.collect(server);
   const [item] = await service.list(server.id);
   const detail = await service.detail(server.id, item.id);
@@ -141,6 +141,43 @@ test('deadlock text opt-in retains bounded XML, and Azure SQL Database is explic
   assert.equal(status.checks.deadlocks.status, 'unavailable');
   assert.match(status.checks.deadlocks.message, /Azure SQL Database.*no server-scoped system_health/);
   assert.doesNotMatch(JSON.stringify(status), /secret-password/);
+});
+
+test('SQL text choice does not imply deadlock XML consent; XML removal and batched stored windows are read-only', async t => {
+  const { service, advance, calls } = await fixture(t, async () => [deadlock]);
+  await service.configure({ enabled: true, deadlocks: true, includeSqlText: true });
+  await service.collect(server);
+  let evidence = await service.list(server.id, { includeEvidence: true });
+  assert.equal(evidence.events[0].data.xml, undefined);
+  assert.equal(evidence.truncated, false);
+  const count = calls.length;
+  await service.list(server.id, { includeEvidence: true });
+  assert.equal(calls.length, count, 'stored reconstruction cannot execute SQL');
+  await service.configure({ includeDeadlockXml: true });
+  advance(120000);
+  await service.collect({ ...server, id: 'another-server' });
+  evidence = await service.list('another-server', { includeEvidence: true });
+  assert.match(evidence.events[0].data.xml, /secret_literal/);
+  await service.configure({ includeDeadlockXml: false });
+  evidence = await service.list('another-server', { includeEvidence: true });
+  assert.equal(evidence.events[0].data.xml, undefined);
+});
+
+test('blocking records original section time, rejects stale source rows, and does not recapture cached evidence', async t => {
+  const { service, advance } = await fixture(t);
+  await service.configure({ enabled: true, blocking: true });
+  const sampledAt = '2026-10-15T12:00:00.000Z';
+  const data = { generated_at: '2026-10-15T12:01:00.000Z',
+    sectionMetadata: { blocking: { sampledAt } }, blocking: [{ session_id: 50, blocking_session_id: 51 }] };
+  await service.observe(server, data);
+  const [event] = await service.list(server.id);
+  assert.equal(event.time, sampledAt);
+  advance(120000);
+  await service.observe(server, data);
+  assert.equal((await service.list(server.id)).length, 1);
+  advance(120000);
+  await service.observe(server, { ...data, sectionMetadata: { blocking: { stale: true } } });
+  assert.equal((await service.list(server.id)).length, 1);
 });
 
 test('Managed Instance permits ring-buffer reads and permission errors do not expose provider secrets', async t => {

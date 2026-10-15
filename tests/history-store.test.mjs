@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { appendFile, mkdtemp, mkdir, readFile, writeFile, readdir, rm } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
-import { createHistoryStore, sanitizeHistorySample, extractIntervalHistoryMetrics } from '../history-store.mjs';
+import { createHistoryStore, sanitizeHistorySample, sanitizeHistoryVisual, extractIntervalHistoryMetrics } from '../history-store.mjs';
 import { createJsonStore } from '../storage.mjs';
 
 const HOUR = 3600000, DAY = HOUR * 24, NOW = Date.parse('2026-10-15T14:00:00Z');
@@ -13,6 +13,79 @@ async function fixture(t, options = {}) {
   return { dataDir, store: createHistoryStore({ dataDir, now: () => NOW, ...options }) };
 }
 const range = { from: NOW - DAY, to: NOW + 1 };
+
+test('history defaults to seven days and a single custom value purges expired raw, rollups and journals on disk', async t => {
+  let clock = NOW;
+  const f = await fixture(t, { now: () => clock });
+  assert.equal((await f.store.status()).retentionDays, 7);
+  assert.equal((await f.store.status()).rawRetentionDays, 7);
+  await f.store.configure({ retentionDays: 30 });
+  assert.equal((await f.store.status()).rawRetentionDays, 30);
+  await f.store.append('paused', { t: NOW - 10 * DAY, sessions: 1 });
+  await f.store.append('paused', { t: NOW - 60000, sessions: 2 });
+  await f.store.configure({ retentionDays: 1 });
+  const state = JSON.parse(await readFile(path.join(f.dataDir, 'history-series', 'paused.json'), 'utf8'));
+  assert.deepEqual(state.raw.map(point => point.sessions), [2]);
+  assert.ok(state.hours.every(point => point.firstT >= NOW - DAY));
+  assert.equal(await readFile(path.join(f.dataDir, 'history-series', 'paused.journal'), 'utf8'), '');
+  clock += 2 * DAY;
+  const restarted = createHistoryStore({ dataDir: f.dataDir, now: () => clock });
+  await restarted.maintenance();
+  const purged = JSON.parse(await readFile(path.join(f.dataDir, 'history-series', 'paused.json'), 'utf8'));
+  assert.deepEqual(purged.raw, []); assert.deepEqual(purged.hours, []);
+  assert.equal((await restarted.status()).retentionDays, 1);
+});
+
+test('purge drops boundary rollups containing expired samples instead of retaining data older than the cutoff', async t => {
+  let clock = NOW + 3000;
+  const f = await fixture(t, { now: () => clock });
+  await f.store.append('one', { t: NOW + 1000, sessions: 1 });
+  await f.store.append('one', { t: NOW + 2000, sessions: 2 });
+  clock = NOW + DAY + 1500;
+  await f.store.configure({ retentionDays: 1 });
+  const state = JSON.parse(await readFile(path.join(f.dataDir, 'history-series', 'one.json'), 'utf8'));
+  assert.deepEqual(state.raw.map(point => point.sessions), [2]);
+  assert.deepEqual(state.hours, []);
+});
+
+test('Back in Time retains real visual labels and interval values without SQL or secrets', async t => {
+  const { store, dataDir } = await fixture(t);
+  const snapshot = {
+    generated_at: new Date(NOW - 60000).toISOString(), engine: 'azure-mi',
+    instance: { user_sessions: 4, connections: 5, server_name: 'PRIVATE_SERVER', password: 'PRIVATE_PASSWORD' },
+    waits: [{ wait_type: 'WRITELOG', wait_time_s: 20, query_text: 'PRIVATE_SQL' }],
+    file_io: [{ db_name: 'PRIVATE_DB', logical_name: 'PRIVATE_PATH', size_mb: 90, avg_read_latency_ms: 99 }],
+    buffer_pool: [{ db_name: 'PRIVATE_DB', buffer_mb: 512 }],
+    top_queries: Array.from({ length: 20 }, (_, index) => ({
+      query_id: index + 1, db_name: 'PRIVATE_DB', query_text: 'PRIVATE_SQL', avg_cpu_ms: index, execs: 2,
+    })),
+    tempdb: { free_mb: 24, password: 'PRIVATE_PASSWORD' },
+    intervals: { elapsedSeconds: 30,
+      waits: { status: 'ready', rows: [{ wait_type: 'WRITELOG', wait_time_s: 3 }] },
+      file_io: { status: 'ready', rows: [{ db_name: 'PRIVATE_DB', avg_read_latency_ms: 2 }] },
+      rates: { status: 'ready', batch_requests_per_sec: 8, compilations_per_sec: 1 } },
+  };
+  await store.append('one', snapshot);
+  const restarted = createHistoryStore({ dataDir, now: () => NOW });
+  const point = (await restarted.query('one', range)).points[0];
+  assert.equal(point.visual.top_queries.length, 20);
+  assert.equal(point.visual.top_queries[0].avg_cpu_ms, 0);
+  assert.equal(point.visual.file_io[0].avg_read_latency_ms, 99);
+  assert.equal(point.visual.intervals.file_io.rows[0].avg_read_latency_ms, 2);
+  assert.equal(point.visual.instance.user_sessions, 4);
+  assert.equal(point.intervalMetrics.batchRequestsPerSec, 8);
+  assert.equal(point.visual.file_io[0].db_name, 'PRIVATE_DB');
+  assert.equal(point.visual.instance.server_name, 'PRIVATE_SERVER');
+  assert.doesNotMatch(JSON.stringify(point), /PRIVATE_SQL|PRIVATE_PASSWORD|query_text|password/);
+  assert.deepEqual(sanitizeHistoryVisual(point.visual), point.visual);
+  const unavailable = sanitizeHistoryVisual({ ...snapshot, sectionMetadata: { waits: { stale: true }, file_io: { error: 'no permission' } } });
+  assert.equal(unavailable.waits[0].wait_time_s, 20);
+  assert.equal(unavailable.sectionMetadata.waits.stale, true);
+  assert.equal(unavailable.sectionMetadata.file_io.error, 'permission-denied');
+  const context = await restarted.context('one', range);
+  assert.doesNotMatch(JSON.stringify(context), /visual|PRIVATE|query_text|password/);
+});
+
 const journalRecord = (seq, sample) => JSON.stringify({
   version: 1, seq, sample, checksum: createHash('sha256').update(JSON.stringify({ seq, sample })).digest('hex'),
 }) + '\n';
@@ -144,7 +217,7 @@ test('time-range queries downsample across the entire window, preserve missing/g
 });
 
 test('baseline comparisons are sample-weighted, retain zero, and distinguish unavailable from zero', async t => {
-  const { store } = await fixture(t, { rawRetentionDays: 1 });
+  const { store } = await fixture(t, { retentionDays: 30, rawRetentionDays: 1 });
   await store.append('one', { t: NOW - 7 * DAY - 60000, sessions: 10 });
   await store.append('one', { t: NOW - DAY - 60000, sessions: 0, blocked: null });
   await store.append('one', { t: NOW - DAY - 50000, sessions: 0 });
@@ -193,7 +266,7 @@ test('ID/path/date/resolution/limit/settings validation rejects before any histo
     { from: '2026-02-30T00:00:00Z' }, { from: '2026-10-14T24:00:00Z' }, { from: '2026-10-14T00:00:00' },
   ]) await assert.rejects(store.query('one', { ...range, ...options }), { status: 400 });
   assert.deepEqual(await readdir(dataDir), []);
-  for (const options of [{ retentionDays: 0 }, { retentionDays: 91 }, { rawRetentionDays: 8 }, { rawRetentionDays: 2, retentionDays: 1 }, { unexpected: true }]) {
+  for (const options of [{ retentionDays: 0 }, { retentionDays: 91 }, { rawRetentionDays: 91 }, { rawRetentionDays: 2, retentionDays: 1 }, { unexpected: true }]) {
     await assert.rejects(store.configure(options), { status: 400 });
   }
   await assert.rejects(store.compare('one', { ...range, baseline: 'month' }), { status: 400 });

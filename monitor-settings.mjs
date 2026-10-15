@@ -3,7 +3,7 @@ import { createJsonStore } from './storage.mjs';
 export const MONITOR_DEFAULTS = Object.freeze({
   enabled: false, intervalSeconds: 60, maxConcurrent: 2,
   collection: Object.freeze({ inventoryIntervalSeconds: 300, queryStoreIntervalSeconds: 120, bufferPoolEnabled: true }),
-  history: Object.freeze({ retentionDays: 30, rawRetentionDays: 7 }),
+  history: Object.freeze({ retentionDays: 7, rawRetentionDays: 7 }),
 });
 
 function object(value, label) {
@@ -36,7 +36,10 @@ export function normalizeMonitorSettings(input = {}, previous = MONITOR_DEFAULTS
   integer(merged.collection.queryStoreIntervalSeconds, 120, 3600, 'Query Store interval');
   boolean(merged.collection.bufferPoolEnabled, 'Buffer pool collection');
   integer(merged.history.retentionDays, 1, 90, 'History retention days');
-  integer(merged.history.rawRetentionDays, 1, 7, 'Raw retention days');
+  if (input.history?.retentionDays !== undefined && input.history.rawRetentionDays === undefined) {
+    merged.history.rawRetentionDays = merged.history.retentionDays;
+  }
+  integer(merged.history.rawRetentionDays, 1, 90, 'Raw retention days');
   if (merged.history.rawRetentionDays > merged.history.retentionDays) throw Object.assign(new Error('Raw history retention cannot exceed total retention'), { status: 400 });
   return merged;
 }

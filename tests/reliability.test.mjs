@@ -15,8 +15,8 @@ import { createIncidentService } from '../incident-store.mjs';
 import { createHistoryStore } from '../history-store.mjs';
 import { createMonitorSettings } from '../monitor-settings.mjs';
 import { classifySqlEndpoint } from '../sql-endpoint.js';
-import { validateConnectionConfig, sqlcmdEnvironment, sqlcmdFailure, redactSqlDiagnostic } from '../sqlcmd-options.mjs';
-import { createConnectionProgress, connectionAbortError, throwIfConnectionAborted, commitConnection } from '../connection-progress.mjs';
+import { validateConnectionConfig, sqlcmdEnvironment, sqlcmdFailure, redactSqlDiagnostic, sqlExecutionBudget, runSqlReadWithRetry } from '../sqlcmd-options.mjs';
+import { createConnectionProgress, connectionAbortError, throwIfConnectionAborted, commitConnection, connectionSignInOptions } from '../connection-progress.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const serverSource = await readFile(path.join(root, 'server.mjs'), 'utf8');
@@ -91,7 +91,7 @@ async function serverFixture(t, overrides = {}) {
     monitorOperations: createMonitorSettings({ settingsFile: path.join(directory, 'monitor-settings.json') }),
     historical: createHistoryStore({ dataDir: directory }),
     validateConnectionConfig, redactSqlDiagnostic,
-    connectionProgress: createConnectionProgress(), connectionAbortError, throwIfConnectionAborted, commitConnection,
+    connectionProgress: createConnectionProgress(), connectionAbortError, throwIfConnectionAborted, commitConnection, connectionSignInOptions,
     validateRequestConnection: (cfg, options) => {
       try { return validateConnectionConfig(cfg, options); }
       catch (error) { throw Object.assign(error, { status: 400 }); }
@@ -453,6 +453,7 @@ test('overview route returns loading snapshots without awaiting SQL and shares t
 test('history appends serialize initial loads and atomically preserve every sample', async t => {
   const directory = await scratch(t);
   const context = { DATA_DIR: directory, path, mkdir, createJsonStore, createHistoryStore,
+    createOperationalInsights: () => ({}), incidents: { settings: async () => ({}) }, loadServers: async () => [],
     setInterval: () => ({ unref() {} }), requestError: (status, message) => new Error(message) };
   const history = section(serverSource, 'const HISTORY_DIR =', '// Custom counters');
   await vm.runInNewContext(`(async () => { ${history}
@@ -512,7 +513,7 @@ test('SQL subprocess executions use unique files and promptly clean success and 
     shutdownController: new AbortController(), AbortSignal,
     sqlProcessLimiter: createAsyncLimiter(2),
     buildSqlcmdArgs: (cfg, args) => args, pickSqlcmd: () => 'mock-sqlcmd',
-    validateConnectionConfig, sqlcmdEnvironment, sqlcmdFailure, process, connectionAbortError, throwIfConnectionAborted,
+    validateConnectionConfig, sqlcmdEnvironment, sqlcmdFailure, sqlExecutionBudget, runSqlReadWithRetry, process, connectionAbortError, throwIfConnectionAborted,
     azureSqlAuth: { withSession: (cfg, operation) => operation({}) }, console: { error() {} },
     execFile: (exe, args, options, callback) => {
       const input = args[args.indexOf('-i') + 1];
@@ -550,6 +551,7 @@ function clientFixture() {
     endpointClassifier: classifySqlEndpoint,
     document: { hidden: false }, AbortController,
     updateDetailActions() {},
+    historyController: null, historicalFrame: null, insightsController: null, insightsSelection: null,
   };
   const state = section(html, 'const MIN_INTERVAL =', 'const el =')
     .replace("import('/sql-endpoint.js')", 'Promise.resolve({ classifySqlEndpoint: endpointClassifier })');
@@ -618,11 +620,11 @@ test('actual server selection independently loads metrics/history and manual ref
   assert.equal(client.requests.length, 4);
   const metrics = client.requests.filter(request => request.url.startsWith('/api/metrics'));
   const history = client.requests.filter(request => request.url.startsWith('/api/history'));
-  history[0].resolve({ json: async () => [] });
+  history[0].resolve({ ok: true, json: async () => [] });
   metrics[0].resolve(response('one'));
   await first;
   assert.deepEqual(client.rendered, []);
-  history[1].resolve({ json: async () => [] });
+  history[1].resolve({ ok: true, json: async () => [] });
   metrics[1].resolve(response('two'));
   await second;
   assert.equal(client.rendered.at(-1), 'two');

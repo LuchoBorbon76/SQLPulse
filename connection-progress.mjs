@@ -5,6 +5,7 @@ const messages = {
   'checking-account': 'Verifying the configured Entra account and tenant.',
   'sign-in': 'Preparing Microsoft browser sign-in. Waiting for the sign-in link…',
   connecting: 'Connecting to SQL.',
+  retrying: 'Temporary Azure SQL connection interruption. Reconnecting once after 5 seconds.',
   testing: 'Testing the SQL connection.',
   probing: 'Detecting the SQL engine.',
   saving: 'Saving the verified connection. Please wait.',
@@ -27,6 +28,16 @@ export function throwIfConnectionAborted(signal) {
 export function commitConnection(context, operation) {
   throwIfConnectionAborted(context?.signal);
   return context?.commit ? context.commit(operation) : operation();
+}
+
+export function connectionSignInOptions(cfg, body, context) {
+  if (body.forceLogin !== undefined && typeof body.forceLogin !== 'boolean') {
+    throw httpError(400, 'forceLogin must be a boolean');
+  }
+  if (body.forceLogin && cfg.auth !== 'azuread-interactive') {
+    throw httpError(400, 'Sign in again requires Microsoft browser or device-code authentication');
+  }
+  return { ...context, forceLogin: body.forceLogin === true };
 }
 
 export function createConnectionProgress({

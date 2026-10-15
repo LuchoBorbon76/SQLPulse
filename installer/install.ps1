@@ -101,7 +101,7 @@ function Ensure-InstallerTool([string]$Name, [string]$Id, [string]$FriendlyName)
 
 function Get-InstallerRuntimeNames {
     @('servers.json', 'ai-settings.json', 'alert-settings.json', 'alert-state.json',
-        'microsoft-email-auth.json', '.encryption-key', 'history', 'history-series', 'monitor-settings.json', 'incident-evidence.json', 'config-backups',
+        'microsoft-email-auth.json', '.encryption-key', 'history', 'history-series', 'monitor-settings.json', 'incident-evidence.json', 'operational-reports.json', 'config-backups',
         '.sql-pulse-tools.json', '.sql-pulse-owner.json', '.sql-pulse-service.json', 'SqlPulse.Service.exe')
 }
 

@@ -20,12 +20,12 @@ import { createMonitorSettings } from '../monitor-settings.mjs';
 import { createIntervalMetrics } from '../interval-metrics.mjs';
 import { classifySqlEndpoint } from '../sql-endpoint.js';
 import {
-  buildSqlcmdArgs, validateConnectionConfig, normalizeTenant, sqlcmdEnvironment, sqlcmdFailure, redactSqlDiagnostic,
+  buildSqlcmdArgs, validateConnectionConfig, normalizeTenant, sqlcmdEnvironment, sqlcmdFailure, redactSqlDiagnostic, sqlExecutionBudget, runSqlReadWithRetry,
 } from '../sqlcmd-options.mjs';
 import { createAzureSqlAuth, azureCliCommand, readSqlToken, sqlTokenMatchesUser } from '../azure-sql-auth.mjs';
 import { cliBrowserCommand, openCliBrowser } from '../cli-browser.mjs';
 import { BROWSER_URL_PREFIX } from '../microsoft-device-signin.js';
-import { createConnectionProgress, connectionAbortError, throwIfConnectionAborted, commitConnection } from '../connection-progress.mjs';
+import { createConnectionProgress, connectionAbortError, throwIfConnectionAborted, commitConnection, connectionSignInOptions } from '../connection-progress.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const source = await readFile(path.join(root, 'server.mjs'), 'utf8');
@@ -72,8 +72,8 @@ async function serverFixture(t, overrides = {}) {
     monitorOperations: createMonitorSettings({ settingsFile: path.join(directory, 'monitor-settings.json') }),
     historical: createHistoryStore({ dataDir: directory }),
     deriveIntervalMetrics: createIntervalMetrics().sample,
-    connectionProgress: createConnectionProgress(), connectionAbortError, throwIfConnectionAborted, commitConnection,
-    classifySqlEndpoint, validateConnectionConfig, buildSqlcmdArgs, sqlcmdEnvironment, sqlcmdFailure, redactSqlDiagnostic,
+    connectionProgress: createConnectionProgress(), connectionAbortError, throwIfConnectionAborted, commitConnection, connectionSignInOptions,
+    classifySqlEndpoint, validateConnectionConfig, buildSqlcmdArgs, sqlcmdEnvironment, sqlcmdFailure, redactSqlDiagnostic, sqlExecutionBudget, runSqlReadWithRetry,
     encryptPassword: async value => value ? 'enc:v1:aXY=:dGFn:Y2lwaGVy' : '',
     decryptPassword: async value => value ? 'fixture-password' : '',
     resolveServer: async value => ({ ...value, password: value.passwordEnc ? 'fixture-password' : '' }),
@@ -476,6 +476,33 @@ test('CLI SQL token matching verifies user claims, expiry/audience and guest ide
   assert.throws(() => readSqlToken({ accessToken: 'not-a-token' }, clock), /unreadable/);
 });
 
+test('Azure monitoring reconnect uses fresh SQL files and budgets without repeating forced Microsoft login', async t => {
+  const fixture = await serverFixture(t);
+  const attempts = [], waits = [];
+  fixture.context.runSqlReadWithRetry = (config, tag, operation, options) =>
+    runSqlReadWithRetry(config, tag, operation, { ...options, wait: async ms => waits.push(ms) });
+  fixture.context.execFile = (exe, args, options, callback) => {
+    const input = args[args.indexOf('-i') + 1], output = args[args.indexOf('-o') + 1];
+    attempts.push({ input, args, options });
+    writeFile(output, attempts.length === 1 ? 'partial stale output' : '1\n').then(() => {
+      callback(attempts.length === 1 ? { code: 1 } : null, '', attempts.length === 1 ? 'read tcp: connection reset by peer' : '');
+    }).catch(callback);
+  };
+  const result = await fixture.runSqlcmdOutput(cfg({ auth: 'azuread-interactive', connectionType: 'azure-mi',
+    server: 'demo.public.zone.database.windows.net,3342' }), 'SELECT 1;', 'test',
+  ['-l', '10', '-t', '15'], 30000, { allowLogin: true, forceLogin: true });
+  assert.equal(result, '1\n');
+  assert.equal(attempts.length, 2);
+  assert.notEqual(attempts[0].input, attempts[1].input);
+  assert.equal(attempts[0].args[attempts[0].args.indexOf('-l') + 1], '30');
+  assert.equal(attempts[0].options.timeout, 50000);
+  assert.deepEqual(waits, [5000]);
+  const authCalls = fixture.calls.filter(call => call.auth);
+  assert.equal(authCalls[0].options.forceLogin, true);
+  assert.equal(authCalls[1].options.forceLogin, false);
+  assert.ok((await readdir(fixture.directory)).every(name => name === 'servers.json'));
+});
+
 test('valid cached CLI SQL session checks scoped and default tenants and does not launch login', async () => {
   const calls = [];
   let toolLookups = 0;
@@ -532,6 +559,62 @@ test('monitoring never opens login for an account mismatch; an explicit request 
   assert.equal(login.command.includes('--username'), false);
   assert.equal(login.command.includes('admin@'), false);
   assert.ok(login.options.timeout >= 180000);
+});
+
+test('explicit Sign in again bypasses a matching cache, rechecks identity and never forces monitoring to log in', async () => {
+  const calls = [];
+  let operations = 0;
+  const auth = createAzureSqlAuth({
+    platform: 'win32', now: () => clock,
+    execFileImpl: (exe, args, options, callback) => {
+      const command = args.at(-1);
+      calls.push(command);
+      callback(null, command.includes('az.cmd login') ? '' : tokenResponse(), '');
+    },
+  });
+  const value = cfg({ auth: 'azuread-interactive', user: 'admin@example.test', tenant: tenantA });
+  await auth.withSession(value, () => { operations++; }, { allowLogin: true, forceLogin: true });
+  assert.match(calls[0], /az\.cmd login/);
+  assert.ok(calls.slice(1).every(command => command.includes('account get-access-token')));
+  assert.equal(calls.length, 3);
+  calls.length = 0;
+  await auth.withSession(value, () => { operations++; }, { forceLogin: true });
+  assert.ok(calls.every(command => !command.includes('az.cmd login')));
+  await auth.withSession({ ...value, auth: 'azuread-integrated' }, () => { operations++; },
+    { allowLogin: true, forceLogin: true });
+  assert.ok(calls.every(command => !command.includes('az.cmd login')));
+  assert.equal(operations, 3);
+});
+
+test('Sign in again is request-only for Add, Edit and Load and is not repeated during engine probing', async t => {
+  const fixture = await serverFixture(t);
+  const value = cfg({ auth: 'azuread-interactive', user: 'admin@example.test', forceLogin: true });
+  for (const [endpoint, method] of [
+    ['/api/servers', 'POST'], ['/api/servers/one', 'PATCH'], ['/api/list-databases', 'POST'],
+  ]) {
+    fixture.calls.length = 0;
+    const result = await fixture.request(endpoint, method, value);
+    assert.equal(result.status, 200);
+    const authCalls = fixture.calls.filter(call => call.auth);
+    assert.equal(authCalls[0].options.forceLogin, true);
+    assert.equal(authCalls[0].options.allowLogin, true);
+    assert.ok(authCalls.slice(1).every(call => !call.options.forceLogin));
+    assert.equal(Object.hasOwn((await fixture.loadServers())[0], 'forceLogin'), false);
+    const invalid = await fixture.request(endpoint, method, { ...value, forceLogin: 'true' });
+    assert.equal(invalid.status, 400);
+    assert.match(invalid.data.error, /forceLogin must be a boolean/);
+  }
+  assert.throws(() => connectionSignInOptions(cfg(), { forceLogin: true }, {}), /requires Microsoft/);
+});
+
+test('Entra SQL login failures explain authorization separately from Microsoft sign-in', () => {
+  const error = sqlcmdFailure({ code: 1 }, { stderr: "mssql: Login failed for user 'fixture'." },
+    cfg({ auth: 'azuread-interactive' }), 'test');
+  assert.match(error.message, /Microsoft sign-in and SQL access are separate/);
+  assert.match(error.message, /resource tenant/);
+  assert.match(error.message, /Sign in again/);
+  const sqlError = sqlcmdFailure({ code: 1 }, { stderr: 'Login failed for user' }, cfg({ auth: 'sqlauth' }));
+  assert.equal(sqlError.message.includes('Microsoft sign-in'), false);
 });
 
 test('Entra Integrated uses only a verified existing CLI identity and never launches a browser', async () => {

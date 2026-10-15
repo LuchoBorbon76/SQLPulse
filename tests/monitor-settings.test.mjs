@@ -12,12 +12,22 @@ test('monitoring is independent, disabled by default and retains bounded compati
   assert.equal(settings.enabled, false);
   assert.equal(settings.maxConcurrent, 2);
   assert.equal(settings.collection.inventoryIntervalSeconds, 300);
-  assert.equal(settings.history.retentionDays, 30);
+  assert.equal(settings.history.retentionDays, 7);
   for (const invalid of [
     { enabled: 'true' }, { intervalSeconds: 29 }, { maxConcurrent: 3 }, { unexpected: true },
     { collection: { queryStoreIntervalSeconds: 10 } }, { collection: { bufferPoolEnabled: 0 } },
     { history: { retentionDays: 91 } }, { history: { retentionDays: 1, rawRetentionDays: 7 } },
   ]) assert.throws(() => normalizeMonitorSettings(invalid), { status: 400 });
+});
+test('one retention value controls snapshot and summary expiry and preserves saved custom periods', () => {
+  for (const days of [1, 3, 7, 30, 90]) {
+    const settings = normalizeMonitorSettings({ history: { retentionDays: days } });
+    assert.equal(settings.history.retentionDays, days);
+    assert.equal(settings.history.rawRetentionDays, days);
+    assert.equal(normalizeMonitorSettings({}, settings).history.retentionDays, days);
+  }
+  for (const days of [0, 91, 1.5, '7']) assert.throws(
+    () => normalizeMonitorSettings({ history: { retentionDays: days } }), { status: 400 });
 });
 test('partial settings saves serialize and survive restart; corrupt settings are surfaced', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'pulse-monitor-'));

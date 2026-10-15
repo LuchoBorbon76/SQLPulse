@@ -6,7 +6,7 @@ import { classifySqlEndpoint } from './sql-endpoint.js';
 
 export const INCIDENT_DEFAULTS = Object.freeze({
   enabled: false, blocking: false, deadlocks: false, queryHistory: false,
-  includeSqlText: false, retainPlans: false, intervalSeconds: 120,
+  includeSqlText: false, includeDeadlockXml: false, retainPlans: false, intervalSeconds: 120,
   retentionDays: 7, maxIncidents: 1000, maxBytes: 5 * 1024 * 1024,
   topQueries: 10, topPlans: 3, maxDatabases: 3, maxTextChars: 4000,
   maxPlanChars: 60000, windowMinutes: 60, baselineMinutes: 240,
@@ -15,7 +15,7 @@ export const INCIDENT_DEFAULTS = Object.freeze({
 });
 
 const TYPES = new Set(['blocking', 'deadlock', 'query-summary', 'query-regression']);
-const BOOLS = ['enabled', 'blocking', 'deadlocks', 'queryHistory', 'includeSqlText', 'retainPlans'];
+const BOOLS = ['enabled', 'blocking', 'deadlocks', 'queryHistory', 'includeSqlText', 'includeDeadlockXml', 'retainPlans'];
 const RANGES = {
   intervalSeconds: [120, 86400], retentionDays: [1, 30], maxIncidents: [10, 5000],
   maxBytes: [65536, 20 * 1024 * 1024], topQueries: [1, 25], topPlans: [1, 5],
@@ -120,7 +120,7 @@ ELSE
       CASE WHEN i.end_time <= DATEADD(minute,-${window},SYSUTCDATETIME()) THEN N'baseline' ELSE N'current' END AS bucket,
       rs.count_executions AS executions, rs.avg_duration * rs.count_executions AS duration_total,
       rs.avg_cpu_time * rs.count_executions AS cpu_total,
-      rs.avg_logical_io_reads * rs.count_executions AS reads_total, i.end_time
+      rs.avg_logical_io_reads * rs.count_executions AS reads_total, i.start_time, i.end_time
     FROM ${db.catalog}.query_store_runtime_stats rs
     JOIN ${db.catalog}.query_store_runtime_stats_interval i ON i.runtime_stats_interval_id=rs.runtime_stats_interval_id
     JOIN ${db.catalog}.query_store_plan p ON p.plan_id=rs.plan_id
@@ -141,9 +141,11 @@ ELSE
     SUM(b.cpu_total)/NULLIF(SUM(b.executions),0)/1000.0 AS avg_cpu_ms,
     SUM(b.reads_total)/NULLIF(SUM(b.executions),0) AS avg_logical_reads,
     COUNT(DISTINCT b.interval_id) AS interval_count, MAX(b.interval_id) AS last_interval_id,
+    CONVERT(nvarchar(40),MIN(b.start_time),127) AS window_start,
     CONVERT(nvarchar(40),MAX(b.end_time),127) AS window_end, ${text} AS query_text,
     JSON_QUERY((SELECT TOP (5) CONVERT(nvarchar(20),pp.plan_id) AS plan_id,CONVERT(varchar(18),pp.query_plan_hash,1) AS plan_hash
       FROM ${db.catalog}.query_store_plan pp WHERE pp.query_id=q.query_id
+        AND EXISTS (SELECT 1 FROM bounded bp WHERE bp.plan_id=pp.plan_id AND bp.bucket=b.bucket)
       ORDER BY pp.last_execution_time DESC,pp.plan_id DESC FOR JSON PATH)) AS plan_hashes
   FROM bounded b JOIN ranked r ON r.query_id=b.query_id
   JOIN ${db.catalog}.query_store_query q ON q.query_id=b.query_id
@@ -247,6 +249,8 @@ export function createIncidentService({ dataDir, runSql, now = Date.now, maxConc
     });
   }
   function prune(state) {
+    state.settings = { ...INCIDENT_DEFAULTS, ...state.settings };
+    scrub(state);
     const cfg = state.settings, cutoff = clock() - cfg.retentionDays * 86400000;
     state.incidents = state.incidents.filter(item => Date.parse(item.observedAt) >= cutoff && Date.parse(item.time) >= cutoff).slice(-cfg.maxIncidents);
     for (const [key, entry] of Object.entries(state.states)) {
@@ -270,8 +274,8 @@ export function createIncidentService({ dataDir, runSql, now = Date.now, maxConc
   }
   function scrub(state) {
     for (const incident of state.incidents) {
+      if (!state.settings.includeDeadlockXml) delete incident.data.xml;
       if (!state.settings.includeSqlText) {
-        delete incident.data.xml;
         for (const row of incident.data.sessions || []) delete row.sqlText;
         for (const query of incident.data.queries || []) delete query.queryText;
         if (incident.data.baseline) delete incident.data.baseline.queryText;
@@ -280,18 +284,19 @@ export function createIncidentService({ dataDir, runSql, now = Date.now, maxConc
       if (!state.settings.retainPlans) delete incident.data.plans;
     }
   }
-  const availability = (status, message) => ({ status, message: clean(message, 600), checkedAt: iso(clock()) });
-  const failure = feature => availability('unavailable', `${feature} could not be read. Verify engine support and existing monitoring permissions. ${PERMISSIONS}`);
+  const availability = (status, message, category = status) => ({ status, category, message: clean(message, 600), checkedAt: iso(clock()) });
+  const failure = (feature, error) => availability('unavailable', `${feature} could not be read. Verify engine support and existing monitoring permissions. ${PERMISSIONS}`,
+    /permission|denied|not authorized|VIEW .* STATE/i.test(String(error?.message || '')) ? 'permission-denied' : 'unavailable');
 
   async function settings() {
-    return serial(async () => copy((await store.read()).settings));
+    return serial(async () => copy({ ...INCIDENT_DEFAULTS, ...(await store.read()).settings }));
   }
   async function configure(patch) {
     generation++;
     return serial(async () => {
       let saved;
       await store.update(state => {
-        const next = settingsValue(patch, state.settings);
+        const next = settingsValue(patch, { ...INCIDENT_DEFAULTS, ...state.settings });
         const reset = ['enabled', 'queryHistory', 'windowMinutes', 'baselineMinutes'].some(key => next[key] !== state.settings[key]);
         state.settings = next;
         if (reset) for (const entry of Object.values(state.states)) entry.samples = {};
@@ -314,7 +319,11 @@ export function createIncidentService({ dataDir, runSql, now = Date.now, maxConc
           .map(query => query.db_name || query.db).filter(value => typeof value === 'string' && value.length <= 128))]
           .slice(0, cfg.maxDatabases);
         if (!cfg.blocking || !Array.isArray(data?.blocking) || !data.blocking.length ||
+            data.sectionMetadata?.blocking?.stale || data.sectionMetadata?.blocking?.error ||
+            data.sectionMetadata?.blocking?.applicable === false ||
             (scope.lastBlocking !== null && clock() - scope.lastBlocking < cfg.intervalSeconds * 1000)) return prune(state);
+        const sourceTime = Date.parse(data.sectionMetadata?.blocking?.sampledAt || data.generated_at);
+        const blockingSampleAt = Number.isFinite(sourceTime) ? iso(sourceTime) : iso(clock());
         const sessions = data.blocking.slice(0, 100).map(row => {
           const value = {
             sessionId: number(row.session_id ?? row.sid),
@@ -333,9 +342,12 @@ export function createIncidentService({ dataDir, runSql, now = Date.now, maxConc
         scope.lastBlocking = clock();
         add(state, server, 'blocking', {
           sessions, rootSessionIds: roots,
+          sampledAt: Number.isFinite(sourceTime) ? blockingSampleAt : null,
+          timeBasis: Number.isFinite(sourceTime) ? 'Source sample time' : 'Observation clock; source sample time unavailable',
+          sectionMetadata: { sampledAt: Number.isFinite(sourceTime) ? blockingSampleAt : null },
           truncated: data.blocking.length > 100,
           message: 'Observed blocking-chain snapshot, including sleeping roots when supplied by the collector. Not a complete trace between polls.',
-        });
+        }, blockingSampleAt, `${blockingSampleAt}:${hash(JSON.stringify(sessions))}`);
         captured = true;
         prune(state);
       });
@@ -373,7 +385,7 @@ export function createIncidentService({ dataDir, runSql, now = Date.now, maxConc
     if (cfg.deadlocks) {
       const kind = classifySqlEndpoint(server.server, server.connectionType || 'auto', server.engineEdition).kind;
       if (kind === 'azure-sqldb') {
-        checks.deadlocks = availability('unavailable', 'Azure SQL Database has no server-scoped system_health session. This collector does not create sessions or change configuration.');
+        checks.deadlocks = availability('unavailable', 'Azure SQL Database has no server-scoped system_health session. This collector does not create sessions or change configuration.', 'unsupported');
       } else {
         try {
           const result = rows(await readSql(server, buildDeadlockSql({ maxTextChars: cfg.maxTextChars }), 'diagnostics-deadlocks', 10,
@@ -386,10 +398,10 @@ export function createIncidentService({ dataDir, runSql, now = Date.now, maxConc
             const fingerprint = hash(`${row.event_time}:${row.event_xml}`);
             const data = { eventHash: fingerprint, eventName: 'xml_deadlock_report', ...summarizeDeadlock(row.event_xml),
               truncated: String(row.event_xml).length >= cfg.maxTextChars };
-            if (cfg.includeSqlText) data.xml = clean(row.event_xml, cfg.maxTextChars);
+            if (cfg.includeDeadlockXml) data.xml = clean(row.event_xml, cfg.maxTextChars);
             events.push({ type: 'deadlock', data, time: iso(Date.parse(row.event_time)), key: fingerprint });
           }
-        } catch { checks.deadlocks = failure('Deadlock evidence'); }
+        } catch (error) { checks.deadlocks = failure('Deadlock evidence', error); }
       }
     }
     if (cfg.queryHistory) {
@@ -409,7 +421,8 @@ export function createIncidentService({ dataDir, runSql, now = Date.now, maxConc
                 executions: number(row.executions), intervals: number(row.interval_count),
                 durationMs: number(row.avg_duration_ms), cpuMs: number(row.avg_cpu_ms),
                 logicalReads: number(row.avg_logical_reads), lastIntervalId: String(row.last_interval_id || ''),
-                windowEnd: clean(row.window_end, 64),
+                windowStart: clean(row.window_start, 64), windowEnd: clean(row.window_end, 64),
+                sampledAt: iso(clock()),
                 planHashes: (Array.isArray(row.plan_hashes) ? row.plan_hashes : []).slice(0, 5)
                   .map(plan => ({ planId: String(plan.plan_id), planHash: clean(plan.plan_hash, 128) })),
               };
@@ -428,6 +441,7 @@ export function createIncidentService({ dataDir, runSql, now = Date.now, maxConc
                   queryId: String(row.query_id), planId: String(row.plan_id),
                   planHash: clean(row.plan_hash || hash(xml), 128), xml,
                   truncated: number(row.plan_chars) > cfg.maxPlanChars,
+                  sampledAt: iso(clock()),
                   kind: 'Query Store compiled plan (not a runtime actual-execution plan)',
                 });
               }
@@ -439,9 +453,9 @@ export function createIncidentService({ dataDir, runSql, now = Date.now, maxConc
             'No complete Query Store intervals in the selected windows. No regression can be inferred.'), planStatus });
           if (queries.length) events.push({
             type: 'query-summary', data: { database: dbName, queries, ...(plans.length ? { plans } : {}), planStatus,
-              windowMinutes: cfg.windowMinutes, baselineMinutes: cfg.baselineMinutes }, database,
+              sampledAt: iso(clock()), windowMinutes: cfg.windowMinutes, baselineMinutes: cfg.baselineMinutes }, database,
           });
-        } catch { checks.queryHistory.push({ database: dbName, ...failure('Query Store evidence') }); }
+        } catch (error) { checks.queryHistory.push({ database: dbName, ...failure('Query Store evidence', error) }); }
       }
       if (!reservation.databases.length) checks.queryHistory.push(availability('unavailable', 'Select a database or first collect top queries; no database was available for bounded Query Store reads.'));
     }
@@ -482,7 +496,7 @@ export function createIncidentService({ dataDir, runSql, now = Date.now, maxConc
   }
   async function status(serverId) {
     return serial(async () => {
-      const state = await store.update(prune), entry = state.states[`server:${serverId}`];
+      const state = await readPruned(), entry = state.states[`server:${serverId}`];
       return {
         enabled: state.settings.enabled, collecting: collecting.has(serverId), permissions: PERMISSIONS,
         lastCollectionAt: entry?.lastCollect === null || entry?.lastCollect === undefined ? null : iso(entry.lastCollect),
@@ -492,15 +506,30 @@ export function createIncidentService({ dataDir, runSql, now = Date.now, maxConc
       };
     });
   }
-  async function list(serverId, { type, since, until, limit = 100 } = {}) {
+  async function readPruned() {
+    return store.update(prune, { skipUnchanged: true });
+  }
+  async function list(serverId, { type, since, until, limit = 100, includeEvidence = false } = {}) {
     if (type && !TYPES.has(type)) throw new Error('Unknown incident type.');
     const start = since ? Date.parse(since) : -Infinity, end = until ? Date.parse(until) : Infinity;
     if ((since && !Number.isFinite(start)) || (until && !Number.isFinite(end)) || start > end) throw new Error('Invalid incident time range.');
     return serial(async () => {
-      const state = await store.update(prune);
-      return state.incidents.filter(item => item.serverId === serverId && (!type || item.type === type) &&
+      const state = await readPruned();
+      const matched = state.incidents.filter(item => item.serverId === serverId && (!type || item.type === type) &&
         Date.parse(item.time) >= start && Date.parse(item.time) <= end)
-        .sort((a, b) => Date.parse(b.time) - Date.parse(a.time)).slice(0, clamp(limit, 1, 500)).map(item => ({
+        .sort((a, b) => Date.parse(b.time) - Date.parse(a.time));
+      const selected = matched.slice(0, clamp(limit, 1, 500));
+      if (includeEvidence) {
+        let bytes = 0;
+        const events = [];
+        for (const item of selected) {
+          bytes += Buffer.byteLength(JSON.stringify(item));
+          if (bytes > 512 * 1024) break;
+          events.push(copy(item));
+        }
+        return { events, truncated: events.length < matched.length };
+      }
+      return selected.map(item => ({
           id: item.id, type: item.type, time: item.time, observedAt: item.observedAt,
           database: item.data.database || '', count: item.data.sessions?.length || item.data.queries?.length || 1,
           ratio: item.data.ratio || null,
@@ -509,13 +538,13 @@ export function createIncidentService({ dataDir, runSql, now = Date.now, maxConc
   }
   async function detail(serverId, incidentId) {
     return serial(async () => {
-      const state = await store.update(prune);
+      const state = await readPruned();
       return copy(state.incidents.find(item => item.serverId === serverId && item.id === incidentId) || null);
     });
   }
   async function stats() {
     return serial(async () => {
-      const state = await store.update(prune);
+      const state = await readPruned();
       return { count: state.incidents.length, bytes: Buffer.byteLength(JSON.stringify(state, null, 2)), maxBytes: state.settings.maxBytes,
         retentionDays: state.settings.retentionDays, maxIncidents: state.settings.maxIncidents };
     });

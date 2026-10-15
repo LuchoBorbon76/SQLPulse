@@ -72,8 +72,9 @@ export function initAlertSettingsUi({
           <label class="email-check email-wide"><input id="email-recovery" type="checkbox" checked> Recovery after a condition successfully reported by notification</label>
           <label class="email-field" for="email-interval">Poll interval (seconds)<input id="email-interval" type="number" min="30" max="1800" value="60"><small>Default 60s; minimum 30s. SQL collection time is additional.</small></label>
           <label class="email-field" for="email-cooldown">Notification cooldown (seconds)<input id="email-cooldown" type="number" min="60" max="86400" value="120"><small>Suppresses flapping and repeated events; unchanged samples never send reminders.</small></label>
+          <label class="email-field email-wide" for="email-detail-level">Email content<select id="email-detail-level"><option value="generic">Generic event only (private default)</option><option value="diagnostic">Diagnostic evidence and read-only next checks (requires new approval)</option></select><small>Diagnostic emails include bounded numeric measurements, units, health thresholds, source/freshness, sampled durations and incident context. No external AI or extra SQL is used. Webhooks stay generic.</small></label>
           <label class="email-check email-wide"><input id="email-server-name" type="checkbox"> Include the connection display name in notifications</label>
-        </div><p class="email-muted">By default, notifications contain only a generic event and UTC detection time. No SQL text, database names, server addresses, custom-counter names or metric values are sent. Enabling display names can reveal private information.</p></fieldset>
+        </div><p class="email-muted">By default, notifications contain only a generic event and UTC detection time. Diagnostic evidence omits SQL text, plans, query literals, database names, endpoints, login names, custom-counter names and error strings. Numeric metrics leave this computer only after you preview and approve diagnostic emails. Enabling display names is a separate privacy opt-in and can reveal private information.</p></fieldset>
         <div class="email-actions"><button type="submit" class="btn" id="email-save">Save / preview enabling</button><button type="button" class="btn ghost" id="email-test">Preview delivery test</button><button type="button" class="btn ghost" id="email-disable">Disable immediately</button></div>
         </div>
       </form>
@@ -123,6 +124,7 @@ export function initAlertSettingsUi({
       cooldownSeconds: Number(el('email-cooldown').value),
       levels: { warning: el('email-warning').checked, critical: el('email-critical').checked },
       sendRecovery: el('email-recovery').checked, includeServerName: el('email-server-name').checked,
+      emailDetailLevel: el('email-detail-level').value,
       smtp: {
         host: el('email-host').value.trim(), port: Number(el('email-port').value), tlsMode: el('email-tls').value,
         authMode: el('email-auth-mode').value,
@@ -187,6 +189,7 @@ export function initAlertSettingsUi({
       'email-host': settings.smtp.host, 'email-port': settings.smtp.port,
       'email-tls': settings.smtp.tlsMode, 'email-user': settings.smtp.username,
       'email-auth-mode': settings.smtp.authMode || 'password',
+      'email-detail-level': settings.emailDetailLevel || 'generic',
     };
     for (const [id, value] of Object.entries(values)) el(id).value = value;
     for (const [id, value] of Object.entries({
@@ -209,7 +212,9 @@ export function initAlertSettingsUi({
     el('email-preview-summary').textContent = value.configSummary;
     el('email-template-hint').textContent = type === 'test'
       ? 'This test sends the exact subject and body shown below. It does not enable monitoring or save these settings.'
-      : 'These are the exact outbound templates. {{time}} is replaced only by the event detection time in UTC; {{serverName}}, when opted in, is replaced by the connection display name. SQL details are never substituted.';
+      : value.emailDetailLevel === 'diagnostic'
+        ? 'Representative diagnostic emails use synthetic evidence below, not your SQL data. Live emails use this same versioned formatter with up to 8 triggered health rules; whitelisted numeric values, units, thresholds, source, freshness, sampled durations and incident status vary. Missing evidence is explicitly unavailable. {{time}} is detection UTC; a display name is included only with separate approval.'
+        : 'These are the exact outbound templates. {{time}} is replaced only by the event detection time in UTC; {{serverName}}, when opted in, is replaced by the connection display name. SQL details are never substituted.';
     el('email-preview-templates').innerHTML = (value.emailEnabled === false ? [] : value.templates).map(t => `<article><h4>${esc(t.subject)}</h4><pre tabindex="0">${esc(t.text)}</pre></article>`).join('')
       + (value.webhookTemplates || []).map(t => `<article><h4>${esc(t.destination)}</h4><pre tabindex="0">${esc(JSON.stringify(t, null, 2))}</pre></article>`).join('');
     el('email-approve').textContent = type === 'test' ? 'Send this exact notification test' : 'Approve & enable background notifications';
@@ -238,7 +243,8 @@ export function initAlertSettingsUi({
       const pendingLogin = await api('microsoft/login-status');
       if (pendingLogin.state === 'running') { renderLogin(pendingLogin); pollMicrosoft(); }
       onMonitoringChanged(settings);
-      status(settings.enabled ? `Notifications enabled. Background polling every ${settings.intervalSeconds}s while the app host is awake and running.` : 'Notifications disabled. No background notification monitoring is authorized.');
+      status(settings.emailDetailApprovalRequired ? 'Diagnostic email format requires a new preview and approval. Until then, automatic emails remain generic.'
+        : settings.enabled ? `Notifications enabled. Background polling every ${settings.intervalSeconds}s while the app host is awake and running.` : 'Notifications disabled. No background notification monitoring is authorized.');
     });
   }
   async function refresh({ preserveDrafts = true } = {}) {
@@ -251,7 +257,7 @@ export function initAlertSettingsUi({
       const values = preserveDrafts ? [
         'email-recipients', 'email-sender', 'email-interval', 'email-cooldown',
         'email-host', 'email-port', 'email-tls', 'email-user', 'email-password',
-        'email-auth-mode', 'email-microsoft-client', 'email-microsoft-tenant',
+        'email-auth-mode', 'email-microsoft-client', 'email-microsoft-tenant', 'email-detail-level',
       ].map(key => [key, el(key).value]) : [];
       const checks = preserveDrafts ? ['email-warning', 'email-critical', 'email-recovery', 'email-server-name']
         .map(key => [key, el(key).checked]) : [];

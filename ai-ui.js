@@ -167,7 +167,8 @@ export function initAiUi({
       <div class="ai-chat-scroll" id="ai-chat-scroll" tabindex="0" aria-label="Conversation messages"><div id="ai-conversation" class="ai-conversation" role="log" aria-label="Conversation"></div><div id="ai-answer" class="ai-answer" hidden aria-live="polite"></div></div>
       <label for="ai-question">Your question</label>
       <textarea id="ai-question" rows="2" maxlength="8000" placeholder="Ask a question about this visual..."></textarea>
-      <div class="ai-actions ai-composer-actions"><button class="btn" id="ai-send">Send question</button><span class="ai-muted">You'll confirm the destination before sending.</span></div>
+      <div id="ai-inline-review" class="ai-inline-review" hidden><p id="ai-send-warning"></p><p id="ai-send-destination"></p><details id="ai-exact-payload"><summary>Exact question &amp; data sent</summary><pre id="ai-exact-payload-text" tabindex="0"></pre></details></div>
+      <div class="ai-actions ai-composer-actions"><button class="btn" id="ai-send">Send question</button><span class="ai-muted">Send approves the question and data shown above. No pop-up.</span></div>
       <div class="ai-recommendations"><p class="ai-muted">Recommended for this visual</p><div id="ai-suggestions" class="ai-suggestions"></div></div>
     </section>
     <details id="ai-context-panel" class="ai-context-panel"><summary>Context &amp; privacy</summary>
@@ -182,6 +183,7 @@ export function initAiUi({
   let returnFocus = null, lastOperation = 0, destroyed = false;
   let mode = 'settings', visual = null, dialogSequence = 0, settingsLoad = null;
   let selectedContext = null, contextLoad = null, contextSequence = 0, lastAnswer = null, chatMessages = [];
+  let reviewSequence = 0, reviewTimer = null, reviewController = null, reviewPending = null;
   function api(path, body, options = {}) {
     const timeoutMs = path === 'ask' || path === 'test' ? 200000 : path.startsWith('models') || path.startsWith('status') ? 65000 : 45000;
     return aiUiRequest(fetchImpl, path, body, { timeoutMs, ...options });
@@ -200,6 +202,12 @@ export function initAiUi({
   }
   function invalidatePreview() {
     preview = null;
+    ++reviewSequence; clearTimeout(reviewTimer); reviewTimer = null;
+    reviewController?.abort(); reviewController = null; reviewPending = null;
+    el('ai-inline-review').hidden = true;
+    el('ai-exact-payload-text').textContent = '';
+    el('ai-send').disabled = busy;
+    el('ai-send').textContent = busy ? 'Working…' : 'Send question';
   }
   function updateProviderSummary() {
     if (!saved || !provider) { el('ai-provider-summary').textContent = 'Loading provider settings…'; return; }
@@ -214,8 +222,8 @@ export function initAiUi({
     });
     if (!value && provider) updateReasoning();
     if (!value && provider === 'azure-openai' && el('ai-manual-model')) el('ai-manual-model').disabled = true;
-    el('ai-send').disabled = value;
-    el('ai-send').textContent = value ? 'Working…' : 'Send question';
+    el('ai-send').disabled = value || Boolean(reviewPending);
+    el('ai-send').textContent = value ? 'Working…' : reviewPending ? 'Preparing…' : 'Send question';
   }
   function draft() { return drafts[provider]; }
   function readForm() {
@@ -485,25 +493,32 @@ export function initAiUi({
       }
     }, 1500);
   }
-  async function sendQuestion() {
-    if (busy || destroyed) return;
-    if (mode !== 'analysis' || !visual) { status('Select a visual before asking a question.', true); return; }
+  function scheduleReview() {
+    invalidatePreview();
+    if (mode !== 'analysis' || !visual || busy || destroyed || !el('ai-question').value.trim()) return;
+    reviewTimer = setTimeout(() => { reviewTimer = null; void prepareReview(); }, 500);
+  }
+  function prepareReview() {
+    if (reviewPending) return reviewPending;
+    if (mode !== 'analysis' || !visual || destroyed || !el('ai-question').value.trim()) return Promise.resolve();
     const selected = visual, serverId = selected.serverId, guard = dialogSequence;
     const question = el('ai-question').value.trim();
-    if (!serverId || getActiveServerId() !== serverId) {
-      invalidatePreview(); status('The selected server changed or was removed. Open Ask AI on the intended visual again.', true); return;
-    }
-    if (!question) { status('Enter a question or choose a recommended prompt.', true); el('ai-question').focus(); return; }
-    await operation(async () => {
-      status('Preparing your question…');
+    const generation = reviewSequence, controller = new AbortController();
+    clearTimeout(reviewTimer); reviewTimer = null; reviewController = controller;
+    el('ai-send').disabled = true; el('ai-send').textContent = 'Preparing…';
+    const request = (async () => {
+      status('Preparing inline question review…');
       await ensureSettings();
       if (contextLoad) await contextLoad;
+      if (generation !== reviewSequence || guard !== dialogSequence || destroyed) return;
+      if (!serverId || getActiveServerId() !== serverId) throw new Error('The selected server changed or was removed. Open Ask AI on the intended visual again.');
       if (!selectedContext) throw new Error('Context is not available. Open Context & privacy and choose Refresh context.');
       readForm();
       if (!draft().model) throw new Error('No model configured. Use Configure to select and save a provider/model before previewing.');
-      await persist();
-      if (guard !== dialogSequence) return;
       const id = provider, d = draft();
+      const dirty = saved.providerId !== id || el('ai-secret').value || d.clearSecret ||
+        ['baseUrl', 'model', 'deployment', 'authMode', 'reasoningEnabled', 'reasoningEffort'].some(key => d[key] !== saved.configs[id][key]);
+      if (dirty) throw new Error('Save the provider settings before reviewing or sending this question.');
       if (!d.model) throw new Error('Select or explicitly enter a model before previewing.');
       const meta = capabilities();
       if (d.reasoningEffort && (!meta.reasoning || !meta.reasoningEfforts?.includes(d.reasoningEffort))) {
@@ -513,15 +528,15 @@ export function initAiUi({
       const data = await api('preview', {
         serverId, providerId: id, model: d.model, reasoningEffort: d.reasoningEffort, question,
         scope: selected.scope, metricId: selected.metricId, panelTitle: selected.title, contextId: selectedContext.contextId,
-      });
-      if (guard !== dialogSequence) return;
+      }, { signal: controller.signal });
+      if (guard !== dialogSequence || generation !== reviewSequence || destroyed || el('ai-question').value.trim() !== question) return;
       if (getActiveServerId() !== serverId) throw new Error('The selected server changed. Open Ask AI on the intended visual again.');
       if (!data.previewId || typeof data.prompt !== 'string') throw new Error('The dashboard did not return a valid payload preview.');
       if (data.serverId && data.serverId !== serverId) throw new Error('The preview server did not match the selected visual.');
       const payload = { ...data, question, serverId, providerId: id, model: d.model, revision: saved.revision, dialogSequence: guard };
       preview = payload;
       const warning = data.isLoopback
-        ? 'This goes to a local model. It may have its own network behavior.'
+        ? '⚠️ This message contains details from your private data. Confirm before I send? The destination is local; the model may have its own network behavior.'
         : '⚠️ This message contains details from your private data. Confirm before I send?';
       const sampledAt = Object.hasOwn(data, 'sampledAt') ? data.sampledAt || 'not available' : data.sampleGeneratedAt || 'not recorded';
       const section = data.sectionMetadata?.[selected.scope];
@@ -530,13 +545,37 @@ export function initAiUi({
           : section?.intervalSeconds ? ` · Section refresh interval: ${section.intervalSeconds}s` : '';
       const lookback = selected.scope === 'top_queries' && section?.lookbackHours
         ? ` · Query Store lookback: ${section.lookbackHours}h (independently sampled)` : '';
-      const message = `To: ${data.providerName} · ${d.model}\n${data.destination}\n\nQuestion: ${question}\n\nContext: ${selected.title} · ${fmtInt(data.contextBytes || 0)} bytes\nSection sampled: ${sampledAt}${freshness}${lookback}\nSnapshot: ${data.sampleGeneratedAt || 'not recorded'}\n\n${warning}\nNothing has been sent yet.`;
-      status('Confirm the destination to send your question.');
-      const approved = await confirmDialog('Send this question?', message, 'Send question', { destructive: false, payload: data.prompt });
-      if (!approved) { invalidatePreview(); status('Cancelled. Nothing was sent.'); return; }
+      el('ai-send-destination').textContent = `To: ${data.providerName} · ${d.model} · ${data.destination}\nQuestion: ${question}\nContext: ${selected.title} · ${fmtInt(data.contextBytes || 0)} bytes · Section sampled: ${sampledAt}${freshness}${lookback} · Snapshot: ${data.sampleGeneratedAt || 'not recorded'}`;
+      el('ai-send-warning').textContent = warning;
+      el('ai-exact-payload-text').textContent = data.prompt;
+      el('ai-exact-payload').open = false;
+      el('ai-inline-review').hidden = false;
+      status('Ready. Send question approves the destination and exact payload shown inline. Nothing has been sent yet.');
+    })().catch(error => {
+      if (!controller.signal.aborted && generation === reviewSequence && guard === dialogSequence && !destroyed) status(error.message, true);
+    }).finally(() => {
+      if (reviewPending === request) reviewPending = null;
+      if (reviewController === controller) reviewController = null;
+      if (generation === reviewSequence && guard === dialogSequence && !destroyed) {
+        el('ai-send').disabled = busy; el('ai-send').textContent = busy ? 'Working…' : 'Send question';
+      }
+    });
+    reviewPending = request;
+    return request;
+  }
+  async function sendQuestion() {
+    if (busy || destroyed) return;
+    if (mode !== 'analysis' || !visual) { status('Select a visual before asking a question.', true); return; }
+    if (!el('ai-question').value.trim()) { status('Enter a question or choose a recommended prompt.', true); el('ai-question').focus(); return; }
+    if (!preview) { await prepareReview(); return; }
+    const payload = preview;
+    if (payload.expiresAt && Date.parse(payload.expiresAt) <= Date.now()) {
+      invalidatePreview(); await prepareReview(); return;
+    }
+    await operation(async () => {
       if (preview !== payload || getActiveServerId() !== payload.serverId || provider !== payload.providerId
         || saved.revision !== payload.revision || mode !== 'analysis' || payload.dialogSequence !== dialogSequence
-        || el('ai-question').value.trim() !== question) {
+        || el('ai-question').value.trim() !== payload.question) {
         invalidatePreview(); throw new Error('The question, server or provider changed. Send again to review the current question.');
       }
       invalidatePreview();
@@ -666,7 +705,7 @@ export function initAiUi({
       button.textContent = prompt.label; button.title = prompt.question;
       button.setAttribute('aria-label', prompt.question);
       button.addEventListener('click', () => {
-        el('ai-question').value = prompt.question; invalidatePreview(); el('ai-question').focus();
+        el('ai-question').value = prompt.question; scheduleReview(); el('ai-question').focus();
       });
       el('ai-suggestions').append(button);
     }
@@ -682,6 +721,7 @@ export function initAiUi({
         status('The saved reasoning effort needs verification. Use Configure to reload models or select Default. Nothing has been sent.');
       }
       el('ai-question').focus();
+      if (el('ai-question').value.trim()) scheduleReview();
     } catch (e) { if (guard === dialogSequence) status(e.message, true); }
   }
   function close() {
@@ -730,7 +770,7 @@ export function initAiUi({
   }); });
   el('ai-refresh-context').addEventListener('click', () => { void operation(async () => { await captureContext({ refresh: true }); status('Context refreshed. A new conversation is ready; no SQL collection was triggered.'); }); });
   el('ai-send').addEventListener('click', () => { void sendQuestion(); });
-  el('ai-question').addEventListener('input', invalidatePreview);
+  el('ai-question').addEventListener('input', scheduleReview);
   let down = null;
   backdrop.addEventListener('mousedown', event => { down = event.target; });
   backdrop.addEventListener('mouseup', event => { if (down === backdrop && event.target === backdrop) close(); down = null; });

@@ -100,7 +100,7 @@ Node.js, go-sqlcmd, GitHub CLI and Azure CLI are left in place — remove them v
 
 Open **Settings → Configure AI provider** to configure GitHub Copilot, OpenRouter, Azure AI Foundry / Azure OpenAI, OpenAI, Anthropic, local OpenAI-compatible models, or native Ollama (default). Provider settings and credentials survive upgrades and provider switching. GitHub CLI (`gh`) and Azure CLI (`az`, for existing-session Entra SQL authentication) are installed/verified by default; `-Minimal` omits them. Installing a CLI is not authentication: sign in only when you choose that feature. Ollama/models, provider subscriptions, endpoints and API keys are configured separately and are not downloaded or purchased by this installer.
 
-Provider testing sends a generic health-check prompt only. **Send question** prepares a review and foreground confirmation before any AI request; cloud and network providers send only the approved SQL context off the machine. See the complete user guide in `docs/README.md` in the release ZIP, or the root README when using source, for endpoint and credential details.
+Provider testing sends a generic health-check prompt only. Typing a question automatically prepares a local inline review with destination, privacy warning and expandable exact payload. **Send question** approves that displayed payload without a second confirmation pop-up; cloud and network providers send only the approved SQL context off the machine. See the complete user guide in `docs/README.md` in the release ZIP, or the root README when using source, for endpoint and credential details.
 
 ## Fleet, counters and optional email
 

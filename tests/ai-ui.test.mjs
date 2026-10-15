@@ -70,7 +70,7 @@ test('auth buttons are enabled independently of discovery and disabled only for 
   const end = source.indexOf('  function draft()', start);
   const controls = ['ai-login', 'ai-switch', 'ai-model', 'ai-close', 'ai-question', 'ai-copy-code', 'ai-login-code', 'ai-send'].map(id => ({ id, disabled: false }));
   const context = {
-    busy: false, loginPending: false, provider: 'github', preview: null,
+    busy: false, loginPending: false, provider: 'github', preview: null, reviewPending: null,
     modal: { querySelectorAll: () => controls },
     el: id => controls.find(control => control.id === id),
     updateReasoning() {},

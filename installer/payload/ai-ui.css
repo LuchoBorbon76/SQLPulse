@@ -51,6 +51,12 @@
 .ai-chat-message.user{background:var(--cp-accent-soft)}
 .ai-chat-message.user div{white-space:pre-wrap}
 .ai-composer-actions{align-items:center;justify-content:space-between;padding:0}
+.ai-inline-review{margin-top:8px;padding:8px 10px;border:1px solid var(--cp-border);border-radius:8px;background:var(--cp-accent-soft);font-size:11px;line-height:1.4;white-space:pre-wrap;overflow-wrap:anywhere}
+.ai-inline-review p{margin:0 0 6px}
+.ai-inline-review #ai-send-warning{color:var(--cp-warning)}
+.ai-inline-review details{padding:0;border:0;background:var(--cp-accent-soft)}
+.ai-inline-review summary{font-size:11px;font-weight:400}
+.ai-inline-review pre{font:10px/1.4 Consolas,"Courier New",monospace;white-space:pre-wrap;overflow-wrap:anywhere;margin:6px 0 0}
 .ai-recommendations{margin-top:18px}
 .ai-recommendations>p{margin:0 0 6px}
 .ai-question-panel>label{font-size:13px;font-weight:650}
@@ -74,6 +80,7 @@
 .ai-analysis .ai-question-panel{display:flex;flex-direction:column;flex:1;min-height:0}
 .ai-analysis .ai-chat-scroll{flex:1;min-height:0;max-height:none;margin:0 0 8px;overscroll-behavior:contain}
 .ai-analysis .ai-question-panel>label,.ai-analysis .ai-question-panel>textarea,.ai-analysis .ai-composer-actions,.ai-analysis .ai-recommendations{flex-shrink:0}
+.ai-analysis .ai-inline-review{flex:0 0 auto;max-height:125px;overflow-y:auto}
 .ai-analysis #ai-question{height:64px;margin-top:4px;padding:8px 10px;resize:none}
 .ai-analysis .ai-composer-actions{margin-top:8px}
 .ai-analysis .ai-recommendations{margin-top:10px}

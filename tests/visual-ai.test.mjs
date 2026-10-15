@@ -253,7 +253,7 @@ function uiFixture() {
         context: selectVisualContext(sample, [], body), sectionMetadata: sample.sectionMetadata }
       : path.endsWith('/preview') ? { previewId: 'synthetic-preview', prompt: 'Synthetic scoped context', providerName: 'Local',
         destination: config.baseUrl, serverId: body.serverId, scope: body.scope, panelTitle: body.panelTitle,
-        sampleGeneratedAt: sample.generated_at, contextBytes: 123, expiresAt: '2026-10-14T12:05:00.000Z' }
+        sampleGeneratedAt: sample.generated_at, contextBytes: 123, expiresAt: new Date(Date.now() + 300000).toISOString() }
       : path.endsWith('/ask') ? { answer: 'Synthetic recommendation' } : { models: [] };
     return { ok: true, json: async () => data };
   };
@@ -299,8 +299,7 @@ test('settings are server-independent; visual dialogs cache settings, stay colla
   });
 });
 
-test('Send question prepares pinned context and a server change during confirmation prevents sending', async () => {
-  let approve;
+test('inline review pins server and a server change before Send prevents disclosure', async () => {
   await withUi(async ({ controller, elements, requests, setActive }) => {
     await controller.askVisual({ serverId: 'pinned', scope: 'waits', title: 'Waits', question: 'Explain waits' });
     assert.deepEqual(requests.map(r => r.path), ['/api/ai/settings', '/api/ai/context']);
@@ -319,29 +318,32 @@ test('Send question prepares pinned context and a server change during confirmat
     assert.equal(prepared.body.visualSampleAt, undefined);
     assert.equal(requests.some(r => r.path.endsWith('/ask')), false);
     assert.equal(requests.filter(r => r.path.endsWith('/settings')).length, 1, 'Unchanged settings must not save or reload models');
-    assert.equal(elements.get('ai-send').disabled, true);
+    assert.equal(elements.get('ai-inline-review').hidden, false);
+    assert.equal(elements.get('ai-send').disabled, false);
     setActive('other');
-    approve(true);
+    elements.get('ai-send').handlers.click();
     await settle();
     assert.equal(requests.some(r => r.path.endsWith('/ask')), false);
     assert.equal(elements.get('ai-send').disabled, false);
-  }, fixture => { fixture.options.confirmDialog = () => new Promise(resolve => { approve = resolve; }); });
+  });
 });
 
-test('one Send action confirms exact payload and sends only its immutable preview ID', async () => {
-  let approve;
-  await withUi(async ({ controller, elements, requests }) => {
+test('Send approves the shown inline payload without any confirmation pop-up', async () => {
+  await withUi(async ({ controller, elements, requests, confirmations }) => {
     await controller.askVisual({ serverId: 'pinned', scope: 'top_queries', question: 'Tune this query' });
     elements.get('ai-send').handlers.click(); await settle();
     elements.get('ai-question').value = 'Changed question';
     elements.get('ai-question').handlers.input();
-    approve(true); await settle();
+    assert.equal(elements.get('ai-inline-review').hidden, true);
     assert.equal(requests.some(r => r.path.endsWith('/ask')), false);
     elements.get('ai-send').handlers.click(); await settle();
-    approve(true); await settle();
+    assert.equal(requests.some(r => r.path.endsWith('/ask')), false);
+    assert.equal(elements.get('ai-exact-payload-text').textContent, 'Synthetic scoped context');
+    elements.get('ai-send').handlers.click(); await settle();
     assert.deepEqual(requests.find(r => r.path.endsWith('/ask')).body, { previewId: 'synthetic-preview' });
     assert.equal(elements.get('ai-answer').textContent, 'Synthetic recommendation');
-  }, fixture => { fixture.options.confirmDialog = () => new Promise(resolve => { approve = resolve; }); });
+    assert.equal(confirmations.length, 0);
+  });
 });
 
 test('simple composer is compact until messages arrive and resets after refreshing context', async () => {
@@ -364,14 +366,16 @@ test('simple composer is compact until messages arrive and resets after refreshi
       elements.get('ai-question').handlers.input();
       elements.get('ai-send').handlers.click(); await settle();
       assert.equal(requests.find(r => r.path.endsWith('/preview')).body.contextId, 'synthetic-context');
-      assert.equal(confirmations[0][2], 'Send question');
-      assert.match(confirmations[0][1], /Explain waits/);
-      assert.equal(confirmations[0][3].payload, 'Synthetic scoped context');
+      assert.equal(confirmations.length, 0);
+      assert.match(elements.get('ai-send-destination').textContent, /Explain waits/);
+      assert.equal(elements.get('ai-exact-payload-text').textContent, 'Synthetic scoped context');
+      elements.get('ai-send').handlers.click(); await settle();
       assert.equal(elements.get('ai-send').disabled, false);
       assert.equal(elements.get('ai-question').value, '');
       assert.equal(modal.classList.contains('ai-has-messages'), true);
       elements.get('ai-question').value = 'What should I prioritize?';
       elements.get('ai-question').handlers.input();
+      elements.get('ai-send').handlers.click(); await settle();
       elements.get('ai-send').handlers.click(); await settle();
       assert.equal(requests.filter(r => r.path.endsWith('/context')).length, 1);
       assert.equal(requests.filter(r => r.path.endsWith('/ask')).length, 2);
@@ -422,17 +426,16 @@ test('a delayed initial capture or its error cannot replace refreshed conversati
       }
 });
 
-test('cancelling confirmation sends nothing, preserves question and permits a retry', async () => {
+test('automatic inline review sends nothing until the user explicitly clicks Send', async () => {
   await withUi(async ({ controller, elements, requests, confirmations }) => {
     await controller.askVisual({ serverId: 'pinned', scope: 'waits', question: 'Explain waits' });
-    elements.get('ai-send').handlers.click(); await settle();
-    assert.equal(confirmations.length, 1);
+    await new Promise(resolve=>setTimeout(resolve, 550)); await settle();
+    assert.equal(confirmations.length, 0);
     assert.equal(requests.some(r => r.path.endsWith('/ask')), false);
-    assert.match(elements.get('ai-status').textContent, /Cancelled.*Nothing was sent/);
+    assert.equal(elements.get('ai-inline-review').hidden, false);
+    assert.match(elements.get('ai-status').textContent, /Ready.*Nothing has been sent/);
     assert.equal(elements.get('ai-question').value, 'Explain waits');
     assert.equal(elements.get('ai-send').disabled, false);
-  }, fixture => {
-    fixture.options.confirmDialog = async (...args) => { fixture.confirmations.push(args); return false; };
   });
 
   test('recommended prompts populate the single composer without sending or confirming', async () => {
@@ -463,18 +466,15 @@ test('cancelling confirmation sends nothing, preserves question and permits a re
     });
   });
 
-  test('repeated Send clicks cannot queue duplicate previews or AI requests while confirming', async () => {
-    let approve;
+  test('repeated Send clicks cannot queue duplicate previews or AI requests', async () => {
     await withUi(async ({ controller, elements, requests }) => {
       await controller.askVisual({ serverId: 'pinned', scope: 'waits', question: 'Explain waits' });
       elements.get('ai-send').handlers.click(); await settle();
-      assert.equal(elements.get('ai-send').disabled, true);
       elements.get('ai-send').handlers.click(); await settle();
       assert.equal(requests.filter(r => r.path.endsWith('/preview')).length, 1);
-      approve(true); await settle();
       assert.equal(requests.filter(r => r.path.endsWith('/ask')).length, 1);
       assert.equal(elements.get('ai-send').disabled, false);
-    }, fixture => { fixture.options.confirmDialog = () => new Promise(resolve => { approve = resolve; }); });
+    });
   });
 });
 
@@ -514,7 +514,7 @@ test('Query Store analysis and preview label lookback and independently sampled 
     await controller.askVisual({ serverId: 'pinned', scope: 'top_queries', question: 'Explain top queries' });
     assert.match(elements.get('ai-visual-context').textContent, /Query Store lookback: 1h.*independently sampled/);
     elements.get('ai-send').handlers.click(); await settle();
-    const info = confirmations[0][1];
+    const info = elements.get('ai-send-destination').textContent;
     assert.match(info, /Section sampled: 2026-10-14T11:55:00.000Z.*STALE/);
     assert.match(info, /Query Store lookback: 1h.*independently sampled/);
     assert.match(info, /Snapshot: 2026-10-14T12:00:00.000Z/);
@@ -544,6 +544,60 @@ test('closing during preview preparation cannot reveal a delayed preview or send
     fixture.options.fetchImpl = (path, options) => path.endsWith('/preview')
       ? new Promise(resolve => { finishPreview = async () => resolve(await original(path, options)); })
       : original(path, options);
+  });
+
+  test('question editing aborts a delayed inline review without replacing the newer reviewed payload', async () => {
+    let releaseOld, oldSignal;
+    await withUi(async ({ controller, elements, requests }) => {
+      await controller.askVisual({ serverId: 'pinned', scope: 'waits' });
+      elements.get('ai-question').value = 'Old question';
+      elements.get('ai-question').handlers.input();
+      elements.get('ai-send').handlers.click(); await settle();
+      assert.equal(elements.get('ai-send').disabled, true);
+      elements.get('ai-question').value = 'New question';
+      elements.get('ai-question').handlers.input();
+      assert.equal(oldSignal.aborted, true);
+      elements.get('ai-send').handlers.click(); await settle();
+      assert.match(elements.get('ai-send-destination').textContent, /New question/);
+      releaseOld(); await settle();
+      assert.match(elements.get('ai-send-destination').textContent, /New question/);
+      assert.equal(elements.get('ai-exact-payload-text').textContent, 'New question payload');
+      assert.equal(requests.some(request=>request.path.endsWith('/ask')), false);
+      elements.get('ai-send').handlers.click(); await settle();
+      assert.deepEqual(requests.find(request=>request.path.endsWith('/ask')).body, { previewId: 'new-question-preview' });
+    }, fixture => {
+      const original = fixture.options.fetchImpl;
+      fixture.options.fetchImpl = async (path, options) => {
+        const response = await original(path, options);
+        if (!path.endsWith('/preview')) return response;
+        const body = JSON.parse(options.body);
+        if (body.question === 'Old question') {
+          oldSignal = options.signal;
+          await new Promise(resolve=>{releaseOld=resolve;});
+          return response;
+        }
+        const data = await response.json();
+        return { ok: true, json: async () => ({ ...data, previewId: 'new-question-preview', prompt: 'New question payload' }) };
+      };
+    });
+  });
+
+  test('expired inline reviews are prepared again but cannot be sent without reviewing the replacement', async () => {
+    await withUi(async ({ controller, elements, requests }) => {
+      await controller.askVisual({ serverId: 'pinned', scope: 'waits', question: 'Explain waits' });
+      elements.get('ai-send').handlers.click(); await settle();
+      elements.get('ai-send').handlers.click(); await settle();
+      assert.equal(requests.filter(request=>request.path.endsWith('/preview')).length, 2);
+      assert.equal(requests.some(request=>request.path.endsWith('/ask')), false);
+    }, fixture => {
+      const original = fixture.options.fetchImpl;
+      fixture.options.fetchImpl = async (path, options) => {
+        const response = await original(path, options);
+        if (!path.endsWith('/preview')) return response;
+        const data = await response.json();
+        return { ok: true, json: async () => ({ ...data, expiresAt: new Date(0).toISOString() }) };
+      };
+    });
   });
 });
 

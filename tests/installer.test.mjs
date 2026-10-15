@@ -60,6 +60,10 @@ test('professional icon contains native high-DPI sizes with valid PNG frames', a
     assert.equal(bytes.subarray(offset, offset + 8).toString('hex'), '89504e470d0a1a0a');
   }
   assert.deepEqual(dimensions, [16, 20, 24, 32, 40, 48, 64, 128, 256]);
+  const generator = await readFile(join(root, 'scripts', 'New-DashboardIcon.ps1'), 'utf8');
+  assert.match(generator, /#0369A1/);
+  assert.match(generator, /#059669/);
+  assert.doesNotMatch(generator, /#F38BA4|#252A32/);
 });
 
 test('SQL Pulse branding is consistent while runtime paths remain backward compatible', async () => {

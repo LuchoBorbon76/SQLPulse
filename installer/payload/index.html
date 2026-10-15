@@ -106,8 +106,6 @@ header.topbar .sub{color:var(--cp-text-muted);font-size:12px;margin-top:2px;}
 .controls .tb{position:relative;display:inline-flex;align-items:center;justify-content:center;gap:5px;height:38px;padding:0 10px;font-size:13px;line-height:1;flex:0 0 auto;white-space:nowrap;}
 .controls .tb .ic{font-size:16px;line-height:1;}
 .controls .tb.icon-only{padding:0;width:38px;}
-.controls .tb .cnt-badge{position:absolute;top:-4px;right:-4px;min-width:16px;height:16px;padding:0 4px;background:var(--cp-danger);color:#fff;font-size:9px;font-weight:700;border-radius:8px;display:none;align-items:center;justify-content:center;line-height:1;box-shadow:0 0 0 2px var(--cp-surface);}
-.controls .tb .cnt-badge.show{display:inline-flex;}
 .controls-row2{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:14px;font-size:12px;color:var(--cp-text-muted);}
 .controls-row2 .refresh-status{display:flex;align-items:center;gap:10px;justify-self:start;}
 .controls-row2 #live-status{min-width:200px;text-align:left;font-variant-numeric:tabular-nums;}
@@ -347,6 +345,8 @@ tr.clickable:hover td:first-child{border-left:3px solid var(--cp-accent);padding
 .health-popover ul:last-child{margin-bottom:0;}
 .health-popover li{margin-bottom:3px;}
 .health-popover .none{color:var(--cp-text-muted);font-style:italic;font-size:12px;}
+.health-popover [data-open-alerts]{margin-top:8px;}
+.semaphore:focus-visible{outline:2px solid var(--cp-accent);outline-offset:2px;}
 </style>
 </head>
 <body>
@@ -413,7 +413,7 @@ tr.clickable:hover td:first-child{border-left:3px solid var(--cp-accent);padding
           <span>Exit</span>
         </button>
       </div>
-      <div class="sig-line">Created by <span class="sig">Luis Fernando Borbon</span> · <span style="opacity:0.7;">© 2026 · v1.4.3</span></div>
+      <div class="sig-line">Created by <span class="sig">Luis Fernando Borbon</span> · <span style="opacity:0.7;">© 2026 · v1.4.4</span></div>
     </div>
   </aside>
 
@@ -438,7 +438,6 @@ tr.clickable:hover td:first-child{border-left:3px solid var(--cp-accent);padding
             </select>
           </label>
           <button class="btn ghost tb" id="pause-btn" title="Pause auto-refresh"><span class="ic">⏸</span><span>Pause</span></button>
-          <button class="btn ghost tb" id="alerts-btn" title="Alerts"><span class="ic">🔔</span><span>Alerts</span><span id="alerts-count-badge" class="cnt-badge">0</span></button>
           <button class="btn ghost tb" id="counters-btn" title="Manage custom counters"><span class="ic">🎯</span><span>Counters</span></button>
           <button class="btn ghost tb" id="snapshot-btn" title="Save this sample as a comparison baseline"><span class="ic">📸</span><span>Save baseline</span></button>
         </div>
@@ -452,7 +451,7 @@ tr.clickable:hover td:first-child{border-left:3px solid var(--cp-accent);padding
         </div>
       </div>
       <div class="topbar-right">
-        <div class="semaphore" id="semaphore" title="Click for details">
+        <div class="semaphore" id="semaphore" title="Click for health details" tabindex="0" role="button" aria-label="Health details" aria-expanded="false">
           <div class="lights"><div class="light r"></div><div class="light y"></div><div class="light g"></div></div>
           <div class="label"><span class="l1">Health</span><span class="l2" id="health-label">…</span></div>
           <span class="caret">▾</span>
@@ -551,7 +550,7 @@ tr.clickable:hover td:first-child{border-left:3px solid var(--cp-accent);padding
       <img src="/sql-dashboard-logo.png" width="64" height="64" alt="" style="border-radius:12px;">
       <div>
         <h2 id="about-title">About and responsible use</h2>
-        <div style="font-size:13px;color:var(--cp-text-muted);">SQL Pulse · v1.4.3</div>
+        <div style="font-size:13px;color:var(--cp-text-muted);">SQL Pulse · v1.4.4</div>
       </div>
     </div>
     <p id="disclaimer-hint" style="font-size:12px;color:var(--cp-text-muted);">Review this notice before using the dashboard.</p>
@@ -1062,7 +1061,13 @@ el('exit-btn').addEventListener('click', async () => {
 // -------------------------------------------------------
 let alertsTab = 'current'; // 'current' | 'history'
 let clearingAlertLog = false;
-el('alerts-btn').addEventListener('click', openAlertsModal);
+el('health-popover').addEventListener('click', event => {
+  if (!event.target.closest('[data-open-alerts]')) return;
+  event.stopPropagation();
+  el('semaphore').classList.remove('open');
+  el('semaphore').setAttribute('aria-expanded', 'false');
+  void openAlertsModal();
+});
 el('alerts-close').addEventListener('click', () => el('alerts-backdrop').classList.remove('show'));
 el('alerts-tab-current').addEventListener('click', () => { alertsTab = 'current'; renderAlertsBody(); });
 el('alerts-tab-history').addEventListener('click', () => { alertsTab = 'history'; renderAlertsBody(); });
@@ -1105,7 +1110,7 @@ function saveAlertLog(id, log){
 
 // Compare current health issues vs previous set; emit log entries for new items and resolved items.
 function recordAlertTransitions(serverId, health, prevHealth){
-  if (health.level === 'unknown') { updateAlertBadge(); return; }
+  if (health.level === 'unknown') return;
   const log = loadAlertLog(serverId);
   const nowIso = new Date().toISOString();
   const prevSet = new Set([...(prevHealth?.critical||[]), ...(prevHealth?.warning||[])]);
@@ -1117,22 +1122,6 @@ function recordAlertTransitions(serverId, health, prevHealth){
   for (const msg of (prevHealth?.critical||[])) if (!curSet.has(msg)) log.push({at:nowIso, level:'critical', event:'resolved', msg});
   for (const msg of (prevHealth?.warning||[]))  if (!curSet.has(msg)) log.push({at:nowIso, level:'warning',  event:'resolved', msg});
   if (log.length > 0) saveAlertLog(serverId, log);
-  updateAlertBadge();
-}
-function updateAlertBadge(){
-  const badge = el('alerts-count-badge');
-  if (dashboardView !== 'detail' || !activeServerId) { badge.classList.remove('show'); return; }
-  const st = serverState.get(activeServerId);
-  if (!st?.data) { badge.classList.remove('show'); return; }
-  const h = computeHealth(st.data);
-  const n = h.critical.length + h.warning.length;
-  if (n > 0) {
-    badge.textContent = n;
-    badge.classList.add('show');
-    badge.style.background = h.critical.length ? 'var(--cp-danger)' : 'var(--cp-warning)';
-  } else {
-    badge.classList.remove('show');
-  }
 }
 
 async function openAlertsModal(){
@@ -1807,7 +1796,7 @@ function renderEmpty(){
   el('err').classList.remove('show');
   el('health-label').textContent = 'Unavailable';
   el('semaphore').classList.remove('healthy','warning','critical');
-  el('health-popover').textContent = 'No collected sample available.';
+  el('health-popover').innerHTML = '<div>No collected sample available.</div><button type="button" class="btn ghost" data-open-alerts>Active alerts &amp; history</button>';
   el('narrative').textContent = 'Select or add a server.';
   el('kpis').innerHTML = '';
   ['timeline','waits','latches','buffer-donut','top-queries','file-io','databases','missing-idx','tempdb','active','waiters','blocking-tree'].forEach(id=>el(id).innerHTML='');
@@ -1848,6 +1837,7 @@ function setDashboardView(view){
   if (dashboardView === 'overview') el('fleet-btn').setAttribute('aria-current','page');
   else el('fleet-btn').removeAttribute('aria-current');
   el('semaphore').classList.remove('open');
+  el('semaphore').setAttribute('aria-expanded','false');
   countdown = refreshSeconds;
   if (dashboardView === 'overview') {
     cancelDetailRequests();
@@ -1860,7 +1850,6 @@ function setDashboardView(view){
   updateDetailActions();
   updatePauseControls();
   renderServerList();
-  updateAlertBadge();
 }
 function updateDetailActions(DATA){
   const currentData = arguments.length ? DATA : serverState.get(activeServerId)?.data;
@@ -1869,7 +1858,6 @@ function updateDetailActions(DATA){
   el('counters-btn').hidden = dashboardView !== 'detail';
   el('snapshot-btn').hidden = dashboardView !== 'detail';
   el('snapshot-btn').disabled = !usable;
-  el('alerts-btn').disabled = dashboardView !== 'detail' && !alertSettingsController;
   document.querySelectorAll('#detail-view [data-ai-scope]').forEach(button => {
     const scope = button.dataset.aiScope;
     let available = !!aiController && usable && button.dataset.aiUnavailable !== 'true';
@@ -2022,7 +2010,6 @@ function fetchMetrics(){
       else setStatus('paused', 'Paused · last collected sample retained');
     }
     renderServerList();
-    updateAlertBadge();
   } catch(e){
     if (e.name === 'AbortError' || request.generation !== detailGeneration) return;
     if (serverState.get(requestedId) !== st || !servers.some(s => s.id === requestedId)) return;
@@ -2190,7 +2177,7 @@ function renderHealth(DATA){
   if (parts.length === 0) parts.push(h.level === 'healthy'
     ? `<h4 class="ok">All clear</h4><div class="none">No performance issues detected.</div>`
     : `<h4>Health unknown</h4><div class="none">Insufficient measurements to assess health. Missing values are not zero.</div>`);
-  el('health-popover').innerHTML = parts.join('');
+  el('health-popover').innerHTML = parts.join('') + '<button type="button" class="btn ghost" data-open-alerts>Active alerts &amp; history</button>';
 }
 
 // Semaphore click-to-open popover (dismiss on outside click)
@@ -2202,6 +2189,18 @@ document.addEventListener('click', (e) => {
     sem.classList.toggle('open');
   } else if (!sem.contains(e.target)) {
     sem.classList.remove('open');
+  }
+  sem.setAttribute('aria-expanded', String(sem.classList.contains('open')));
+});
+el('semaphore').addEventListener('keydown', event => {
+  if (event.target !== el('semaphore')) return;
+  if (event.key === 'Enter' || event.key === ' ') {
+    event.preventDefault();
+    const sem = el('semaphore'); sem.classList.toggle('open');
+    sem.setAttribute('aria-expanded', String(sem.classList.contains('open')));
+  } else if (event.key === 'Escape') {
+    el('semaphore').classList.remove('open');
+    el('semaphore').setAttribute('aria-expanded','false');
   }
 });
 

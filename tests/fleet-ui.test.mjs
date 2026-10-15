@@ -252,6 +252,8 @@ test('overview is the landing page, provider settings are sidebar-only, and Expo
   assert.match(html, /classList\.toggle\('overview-topbar', dashboardView === 'overview'\)/);
   assert.match(html, /el\('counters-btn'\)\.hidden = dashboardView !== 'detail'/);
   assert.match(html, /el\('snapshot-btn'\)\.hidden = dashboardView !== 'detail'/);
+  assert.doesNotMatch(html, /alerts-btn|alerts-count-badge/);
+  assert.match(html, /data-open-alerts>Active alerts &amp; history/);
   for (const scope of ['instance', 'timeline', 'blocking', 'active', 'waiters', 'waits', 'latches', 'buffer_pool', 'file_io', 'databases', 'top_queries', 'missing_indexes', 'tempdb']) {
     assert.match(html, new RegExp(`data-ai-panel="${scope}"`));
     assert.match(html, new RegExp(`data-ai-scope="${scope}"[^>]* disabled`));

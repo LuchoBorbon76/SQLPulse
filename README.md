@@ -165,7 +165,7 @@ Each connection supports at most 20 counters, with two concurrent counter querie
 
 ## Email alerts
 
-The detailed **Alerts** dialog separates **Active** issues from browser-stored **History**. **Clear history** deletes only recorded transitions for the selected server, switches to the empty History tab, and confirms completion. Active warnings remain until their SQL condition is resolved; clearing history does not dismiss them or reset email deduplication.
+Open a server's **Health** panel and choose **Active alerts & history** to access its alert log; the toolbar has no separate Alerts button. The dialog separates **Active** issues from browser-stored **History**. **Clear history** deletes only recorded transitions for the selected server, switches to the empty History tab, and confirms completion. Active warnings remain until their SQL condition is resolved; clearing history does not dismiss them or reset email deduplication. **Email alerts** configuration remains in the sidebar.
 
 Open **Settings → Email alerts** or configure email from Alerts. Add recipient addresses, a sender and an authorized SMTP relay/account. SMTP requires implicit TLS or verified STARTTLS; stored usernames/passwords are encrypted with the same DPAPI-protected key as SQL credentials. Credentials are never returned in settings or stored in the browser.
 

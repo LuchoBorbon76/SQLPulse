@@ -3,7 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>SQL Performance Dashboard</title>
+<title>SQL Pulse</title>
+<link rel="icon" type="image/x-icon" href="/favicon.ico">
 <script>
   (() => {
     const saved = localStorage.getItem('theme');
@@ -13,6 +14,10 @@
     document.documentElement.setAttribute("data-theme", theme);
   })();
 </script>
+<link rel="stylesheet" href="/ai-ui.css">
+<link rel="stylesheet" href="/fleet-ui.css">
+<link rel="stylesheet" href="/counters-ui.css">
+<link rel="stylesheet" href="/alerts-ui.css">
 <style>
 :root{color-scheme:light;--cp-bg:#f7f4ef;--cp-bg-elevated:#fcfbf8;--cp-surface:#ffffff;--cp-surface-soft:#f5f5f5;--cp-border:#dedede;--cp-border-strong:#919191;--cp-text:#242424;--cp-text-muted:#5c5c5c;--cp-text-soft:#6f6f6f;--cp-accent:#b11f4b;--cp-accent-hover:#9a1a41;--cp-accent-soft:rgba(177,31,75,0.08);--cp-accent-fg:#ffffff;--cp-success:#16a34a;--cp-danger:#dc2626;--cp-warning:#f59e0b;--cp-link:#0078d4;--cp-highlight:rgba(177,31,75,0.12);}
 html[data-theme="dark"]{color-scheme:dark;--cp-bg:#3d3b3a;--cp-bg-elevated:#343231;--cp-surface:#292929;--cp-surface-soft:#2e2e2e;--cp-border:#474747;--cp-border-strong:#5f5f5f;--cp-text:#dedede;--cp-text-muted:#919191;--cp-text-soft:#b0b0b0;--cp-accent:#fd8ea1;--cp-accent-hover:#fb7b91;--cp-accent-soft:rgba(253,142,161,0.14);--cp-accent-fg:#1a1a1a;--cp-success:#4ade80;--cp-danger:#f87171;--cp-warning:#fbbf24;--cp-link:#4da6ff;--cp-highlight:rgba(253,142,161,0.12);}
@@ -198,10 +203,13 @@ tr:hover td{background:var(--cp-surface-soft);}
 .footer{color:var(--cp-text-soft);font-size:12px;text-align:center;padding:16px;}
 .error-banner{background:rgba(220,38,38,0.1);border:1px solid var(--cp-danger);color:var(--cp-danger);padding:10px 14px;border-radius:8px;margin-bottom:16px;font-size:13px;font-family:Consolas,monospace;display:none;}
 .error-banner.show{display:block;}
-.btn{background:var(--cp-accent);color:var(--cp-accent-fg);border:none;padding:6px 14px;border-radius:8px;font-size:12px;font-weight:600;cursor:pointer;transition:background 0.15s;}
-.btn:hover{background:var(--cp-accent-hover);}
-.btn.ghost{background:transparent;color:var(--cp-text-muted);border:1px solid var(--cp-border);}
-.btn.ghost:hover{background:var(--cp-surface-soft);}
+:root{--cp-button-height:30px;--cp-button-radius:8px;}
+.btn{box-sizing:border-box;min-height:var(--cp-button-height);background:var(--cp-accent);color:var(--cp-accent-fg);border:1px solid transparent;padding:5px 10px;border-radius:var(--cp-button-radius);font-family:inherit;font-size:11px;line-height:1.25;font-weight:600;cursor:pointer;transition:background 0.15s,border-color 0.15s;}
+button.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;vertical-align:middle;}
+.btn:hover:not(:disabled){background:var(--cp-accent-hover);}
+.btn.ghost{background:var(--cp-surface);color:var(--cp-text-muted);border:1px solid var(--cp-border);}
+.btn.ghost:hover:not(:disabled){background:var(--cp-surface-soft);border-color:var(--cp-border-strong);}
+.btn:focus-visible{outline:2px solid var(--cp-accent);outline-offset:2px;}
 .btn.danger{background:var(--cp-danger);}
 .btn.danger:hover{background:#b91c1c;}
 .btn:disabled{opacity:0.5;cursor:not-allowed;}
@@ -210,7 +218,29 @@ tr:hover td{background:var(--cp-surface-soft);}
 /* Modal */
 .modal-backdrop{position:fixed;inset:0;background:rgba(0,0,0,0.55);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);display:none;align-items:center;justify-content:center;z-index:100;padding:20px;animation:mb-fade 0.18s ease-out;}
 .modal-backdrop.show{display:flex;}
+#confirm-backdrop{z-index:120;}
+#confirm-message{white-space:pre-wrap;overflow-wrap:anywhere;}
+.confirm-modal.with-payload{overflow-y:auto;}
+#confirm-payload{margin-top:16px;text-align:left;font-size:12px;}
+#confirm-payload summary{cursor:pointer;color:var(--cp-text-muted);}
+#confirm-payload-text{max-height:30vh;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;padding:12px;border:1px solid var(--cp-border);border-radius:10px;background:var(--cp-bg);color:var(--cp-text);font:11px/1.5 Consolas,"Courier New",monospace;}
 .modal{background:var(--cp-surface);border:1px solid var(--cp-border);border-radius:16px;padding:24px;max-width:520px;width:100%;max-height:90vh;overflow-y:auto;box-shadow:0 20px 50px rgba(0,0,0,0.3);animation:m-pop 0.22s cubic-bezier(0.34,1.56,0.64,1);}
+#modal-backdrop .connection-modal{width:min(940px,100%);max-width:940px;max-height:calc(100dvh - 32px);padding:20px 24px;overflow-x:hidden;}
+.connection-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;}
+.connection-grid .field{min-width:0;margin:0;}
+.connection-grid .connection-wide{grid-column:1/-1;}
+#modal-backdrop .connection-modal .sub{margin-bottom:8px;}
+.connection-modal .field input,.connection-modal .field select{padding:6px 10px;}
+.connection-modal .connection-security{font-size:11px;color:var(--cp-text-muted);line-height:1.45;padding:8px 10px;margin:0 0 12px;border:1px solid var(--cp-border);border-radius:8px;background:var(--cp-surface-soft);}
+.connection-modal .field .hint{line-height:1.35;margin-top:3px;}
+.connection-modal .connection-database{display:flex;gap:8px;min-width:0;}
+.connection-modal .connection-database input{flex:1;min-width:0;}
+.connection-modal #modal-err{margin:12px 0 0;font-size:12px;line-height:1.4;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;}
+.connection-modal #modal-err details{margin-top:6px;}.connection-modal #modal-err pre{font:inherit;white-space:pre-wrap;overflow-wrap:anywhere;margin:6px 0 0;}
+.connection-modal .connection-status{margin-top:8px;font-size:12px;color:var(--cp-text-muted);}
+.connection-modal .connection-status:empty{display:none;}
+#modal-backdrop .connection-modal .actions{margin-top:12px;}
+@media(max-width:600px){#modal-backdrop .connection-modal{padding:16px;}.connection-grid{grid-template-columns:1fr;gap:10px;}.connection-grid .connection-wide{grid-column:auto;}}
 @keyframes mb-fade{from{opacity:0}to{opacity:1}}
 @keyframes m-pop{from{opacity:0;transform:translateY(8px) scale(0.96)}to{opacity:1;transform:translateY(0) scale(1)}}
 
@@ -224,9 +254,7 @@ tr:hover td{background:var(--cp-surface-soft);}
 .confirm-modal h2{font-size:20px;font-weight:600;margin:0 0 8px;letter-spacing:-0.01em;}
 .confirm-modal .sub{font-size:13.5px;line-height:1.55;color:var(--cp-text-secondary);margin:0 4px 4px;text-align:center;}
 .confirm-modal .actions{justify-content:center;gap:10px;}
-.confirm-modal .actions .btn{padding:10px 22px;font-size:13px;border-radius:10px;min-width:100px;}
-.confirm-modal .actions .btn.danger{box-shadow:0 4px 12px rgba(220,38,38,0.35);}
-.confirm-modal .actions .btn.danger:hover{box-shadow:0 6px 16px rgba(220,38,38,0.5);transform:translateY(-1px);}
+.confirm-modal .actions .btn{padding:5px 12px;font-size:11px;border-radius:var(--cp-button-radius);min-width:80px;}
 .confirm-modal .actions .btn{transition:all 0.15s ease;}
 .modal h2{margin:0 0 4px;font-size:18px;font-weight:600;}
 .modal .sub{color:var(--cp-text-muted);font-size:12px;margin-bottom:16px;}
@@ -340,15 +368,22 @@ tr.clickable:hover td:first-child{border-left:3px solid var(--cp-accent);padding
           <circle cx="30" cy="25" r="2" fill="var(--cp-success)"/>
         </svg>
         <div class="brand-text">
-          <div class="brand-title">SQL Performance</div>
-          <div class="brand-subtitle">DASHBOARD</div>
+          <div class="brand-title">SQL Pulse</div>
+          <div class="brand-subtitle">MONITOR · DIAGNOSE · TUNE</div>
         </div>
       </div>
       <div class="brand-tag">Multi-instance live monitoring</div>
     </div>
+    <button class="btn ghost fleet-nav active" id="fleet-btn" aria-current="page">▦ All servers</button>
     <h3>Servers</h3>
     <div class="server-list" id="server-list"><div class="empty" style="font-size:12px;">Loading…</div></div>
-    <button class="add-btn" id="add-server-btn">+ Add server</button>
+    <button class="add-btn" id="add-server-btn"><span aria-hidden="true">+</span> Add server</button>
+    <section class="sidebar-settings" aria-labelledby="sidebar-settings-title">
+      <h3 id="sidebar-settings-title">Settings</h3>
+      <button class="btn ghost configure-ai sidebar-setting" id="ai-btn" title="Configure an AI provider"><span class="setting-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="7" width="14" height="13" rx="3"/><path d="M12 3v4M2 12h3m14 0h3M9 16h6"/><circle cx="9" cy="11" r=".8" fill="currentColor"/><circle cx="15" cy="11" r=".8" fill="currentColor"/></svg></span><span class="setting-copy"><strong>Configure AI provider</strong><small>Model &amp; credentials</small></span><span class="setting-chevron" aria-hidden="true">›</span></button>
+      <button type="button" class="btn ghost sidebar-setting" id="alert-settings-btn" title="Configure optional email alerts"><span class="setting-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="m3 7 9 6 9-6"/></svg></span><span class="setting-copy"><strong>Email alerts</strong><small>Recipients &amp; delivery</small></span><span class="setting-chevron" aria-hidden="true">›</span></button>
+      <div id="email-monitor-status" class="monitor-status" role="status" aria-live="polite" data-state="unknown">Email status not loaded</div>
+    </section>
     <div class="sidebar-footer">
       <div class="theme-menu" id="theme-menu">
         <div class="theme-menu-title">Choose theme</div>
@@ -367,23 +402,27 @@ tr.clickable:hover td:first-child{border-left:3px solid var(--cp-accent);padding
       <div class="footer-actions">
         <button class="fa-btn" id="theme-btn" title="Choose theme" aria-label="Theme">
           <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a9 9 0 1 0 0 18c1.66 0 3-1.34 3-3 0-.78-.3-1.5-.79-2.04-.48-.53-.78-1.24-.78-2 0-1.63 1.34-2.96 2.97-2.96H18a4 4 0 0 0 4-4c0-4.42-4.48-8-10-8z"/><circle cx="6.5" cy="12.5" r="1.1"/><circle cx="9.5" cy="7.5" r="1.1"/><circle cx="14.5" cy="7.5" r="1.1"/><circle cx="17.5" cy="12.5" r="1.1"/></svg>
+          <span>Theme</span>
         </button>
-        <button class="fa-btn" id="info-btn" title="About this dashboard" aria-label="About">
+        <button class="fa-btn" id="info-btn" title="About and responsible-use disclaimer" aria-label="About and disclaimer">
           <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9.5"/><line x1="12" y1="11" x2="12" y2="16.5"/><circle cx="12" cy="7.75" r="1" fill="currentColor" stroke="none"/></svg>
+          <span>About</span>
         </button>
         <button class="fa-btn danger" id="exit-btn" title="Stop the dashboard server and close this tab" aria-label="Exit">
           <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 4.5A9 9 0 1 0 15.5 4.5"/><line x1="12" y1="2.5" x2="12" y2="12"/></svg>
+          <span>Exit</span>
         </button>
       </div>
-      <div class="sig-line">Created by <span class="sig">Luis Fernando Borbon</span> · <span style="opacity:0.7;">© 2026 · v1.0</span></div>
+      <div class="sig-line">Created by <span class="sig">Luis Fernando Borbon</span> · <span style="opacity:0.7;">© 2026 · v1.4.2</span></div>
     </div>
   </aside>
 
   <main class="main">
-    <header class="topbar">
+    <header class="topbar overview-topbar" id="dashboard-topbar">
       <div class="topbar-left">
         <div>
-          <h2 id="current-server-title">No server selected</h2>
+          <button class="btn ghost" id="fleet-back-btn" hidden>← All servers</button>
+          <h2 id="current-server-title">All servers</h2>
           <div class="sub" id="current-server-sub"></div>
         </div>
         <div class="controls">
@@ -399,11 +438,9 @@ tr.clickable:hover td:first-child{border-left:3px solid var(--cp-accent);padding
             </select>
           </label>
           <button class="btn ghost tb" id="pause-btn" title="Pause auto-refresh"><span class="ic">⏸</span><span>Pause</span></button>
-          <button class="btn ghost tb" id="ai-btn" title="Ask AI (local Ollama) about this server"><span class="ic">🤖</span><span>Ask AI</span></button>
           <button class="btn ghost tb" id="alerts-btn" title="Alerts"><span class="ic">🔔</span><span>Alerts</span><span id="alerts-count-badge" class="cnt-badge">0</span></button>
           <button class="btn ghost tb" id="counters-btn" title="Manage custom counters"><span class="ic">🎯</span><span>Counters</span></button>
-          <button class="btn ghost tb" id="snapshot-btn" title="Save current sample as baseline"><span class="ic">📸</span><span>Snapshot</span></button>
-          <button class="btn ghost tb" id="export-btn" title="Download current metrics as JSON"><span class="ic">⬇</span><span>Export</span></button>
+          <button class="btn ghost tb" id="snapshot-btn" title="Save this sample as a comparison baseline"><span class="ic">📸</span><span>Save baseline</span></button>
         </div>
         <div class="controls-row2">
           <div></div>
@@ -428,55 +465,58 @@ tr.clickable:hover td:first-child{border-left:3px solid var(--cp-accent);padding
       </div>
     </header>
 
+    <section id="overview-view" aria-label="All servers overview"></section>
+    <section id="detail-view" aria-label="Detailed server dashboard" hidden>
     <div class="error-banner" id="err"></div>
     <div class="narrative" id="narrative">Select a server to view metrics…</div>
-    <div class="kpi-grid" id="kpis"></div>
+    <div class="panel-heading"><h2>Instance metrics</h2><button type="button" class="btn ghost panel-ai" data-ai-scope="instance" disabled>Ask AI</button></div>
+    <div class="kpi-grid" id="kpis" data-ai-panel="instance"></div>
 
-    <div class="card" style="margin-bottom:16px;">
-      <h2>Timeline</h2>
+    <div class="card" data-ai-panel="timeline" style="margin-bottom:16px;">
+      <div class="panel-heading"><h2>Timeline</h2><button type="button" class="btn ghost panel-ai" data-ai-scope="timeline" disabled>Ask AI</button></div>
       <div class="card-sub">Recent samples from the local history buffer (up to 120 points)</div>
       <div id="timeline" style="min-height:180px;"><div class="skeleton" style="height:180px"></div></div>
     </div>
 
     <!-- ============ Right now: who's stuck? ============ -->
-    <div class="card" id="blocking-card" style="margin-bottom:16px;display:none;">
-      <h2>⚠ Blocking chain</h2>
+    <div class="card" id="blocking-card" data-ai-panel="blocking" style="margin-bottom:16px;display:none;">
+      <div class="panel-heading"><h2>⚠ Blocking chain</h2><button type="button" class="btn ghost panel-ai" data-ai-scope="blocking" disabled>Ask AI</button></div>
       <div class="card-sub" id="blocking-sub">Head blockers and their downstream victims</div>
       <div id="blocking-tree"></div>
     </div>
 
-    <div class="card" style="margin-bottom:16px;">
-      <h2>Active Sessions</h2>
+    <div class="card" data-ai-panel="active" style="margin-bottom:16px;">
+      <div class="panel-heading"><h2>Active Sessions</h2><button type="button" class="btn ghost panel-ai" data-ai-scope="active" disabled>Ask AI</button></div>
       <div class="card-sub">Non-system requests currently running · click ☠ to KILL, 📄 to view live plan</div>
       <div id="active"></div>
     </div>
 
-    <div class="card" id="waiters-card" style="margin-bottom:16px;display:none;">
-      <h2>Waiting Tasks (with plan)</h2>
+    <div class="card" id="waiters-card" data-ai-panel="waiters" style="margin-bottom:16px;display:none;">
+      <div class="panel-heading"><h2>Waiting Tasks (with plan)</h2><button type="button" class="btn ghost panel-ai" data-ai-scope="waiters" disabled>Ask AI</button></div>
       <div class="card-sub">Currently-blocked or waiting tasks — click 📄 to view the executing plan</div>
       <div id="waiters"></div>
     </div>
 
     <!-- ============ Aggregated wait analysis ============ -->
     <div class="grid">
-      <div class="card"><h2>Top Waits</h2><div class="card-sub">Cumulative since instance start — where SQL Server spends its time</div><div id="waits"><div class="skeleton" style="height:200px"></div></div></div>
-      <div class="card" id="latches-card"><h2>Latch Contention</h2><div class="card-sub">Non-BUFFER latches — internal memory-structure contention</div><div id="latches"></div></div>
+      <div class="card" data-ai-panel="waits"><div class="panel-heading"><h2>Top Waits</h2><button type="button" class="btn ghost panel-ai" data-ai-scope="waits" disabled>Ask AI</button></div><div class="card-sub">Cumulative since instance start — not wait rates for this refresh interval</div><div id="waits"><div class="skeleton" style="height:200px"></div></div></div>
+      <div class="card" id="latches-card" data-ai-panel="latches"><div class="panel-heading"><h2>Latch Contention</h2><button type="button" class="btn ghost panel-ai" data-ai-scope="latches" disabled>Ask AI</button></div><div class="card-sub">Non-BUFFER latches — cumulative internal memory-structure contention</div><div id="latches"></div></div>
     </div>
 
     <!-- ============ Resources ============ -->
-    <div class="card" id="buffer-card" style="margin-bottom:16px;">
-      <h2>Buffer Pool by Database</h2>
+    <div class="card" id="buffer-card" data-ai-panel="buffer_pool" style="margin-bottom:16px;">
+      <div class="panel-heading"><h2>Buffer Pool by Database</h2><button type="button" class="btn ghost panel-ai" data-ai-scope="buffer_pool" disabled>Ask AI</button></div>
       <div class="card-sub">RAM used for cached pages per DB</div>
       <div class="donut" id="buffer-donut"><div class="skeleton" style="height:200px;width:100%"></div></div>
     </div>
 
     <div class="grid one">
-      <div class="card"><h2>File I/O Latency</h2><div class="card-sub" id="fileio-sub">Per-file read/write stalls</div>
+      <div class="card" data-ai-panel="file_io"><div class="panel-heading"><h2>File I/O Latency</h2><button type="button" class="btn ghost panel-ai" data-ai-scope="file_io" disabled>Ask AI</button></div><div class="card-sub" id="fileio-sub">Per-file cumulative read/write stalls</div>
         <div class="scroll compact"><table><thead><tr>
           <th>Database</th><th>File</th><th>Type</th><th class="num">MB</th><th class="num">Read ms</th><th class="num">Write ms</th>
         </tr></thead><tbody id="file-io"></tbody></table></div>
       </div>
-      <div class="card"><h2>Databases</h2><div class="card-sub">Size, state, and backup age</div>
+      <div class="card" data-ai-panel="databases"><div class="panel-heading"><h2>Databases</h2><button type="button" class="btn ghost panel-ai" data-ai-scope="databases" disabled>Ask AI</button></div><div class="card-sub">Size, state, and backup age (where exposed by the service)</div>
         <div class="scroll compact"><table><thead><tr>
           <th>Name</th><th>State</th><th>Recovery</th><th>Comp. Level</th><th class="num">Data MB</th><th class="num">Log MB</th><th class="ctr">Last Full</th><th class="ctr">Query Store</th>
         </tr></thead><tbody id="databases"></tbody></table></div>
@@ -484,9 +524,9 @@ tr.clickable:hover td:first-child{border-left:3px solid var(--cp-accent);padding
     </div>
 
     <!-- ============ Tuning ============ -->
-    <div class="card" style="margin-bottom:16px;">
-      <h2>Top Queries by CPU (Query Store)</h2>
-      <div class="card-sub">Highest cumulative CPU across all user databases with Query Store enabled</div>
+    <div class="card" data-ai-panel="top_queries" style="margin-bottom:16px;">
+      <div class="panel-heading"><h2>Top Queries by CPU (recent-hour Query Store)</h2><button type="button" class="btn ghost panel-ai" data-ai-scope="top_queries" disabled>Ask AI</button></div>
+      <div class="card-sub">Highest CPU from Query Store intervals covering the recent hour · independently sampled across enabled user databases</div>
       <div class="scroll">
       <table><thead><tr>
         <th>DB</th><th>QID</th><th class="num">Execs</th><th class="num">Total CPU (ms)</th>
@@ -497,25 +537,38 @@ tr.clickable:hover td:first-child{border-left:3px solid var(--cp-accent);padding
     </div>
 
     <div class="grid">
-      <div class="card"><h2>Missing Indexes</h2><div class="card-sub">Optimizer-suggested indexes ranked by improvement score</div><div id="missing-idx"></div></div>
-      <div class="card" id="tempdb-card"><h2>TempDB Usage</h2><div class="card-sub">Space allocation breakdown</div><div id="tempdb"></div></div>
+      <div class="card" data-ai-panel="missing_indexes"><div class="panel-heading"><h2>Missing Indexes</h2><button type="button" class="btn ghost panel-ai" data-ai-scope="missing_indexes" disabled>Ask AI</button></div><div class="card-sub">Optimizer-suggested indexes ranked by improvement score</div><div id="missing-idx"></div></div>
+      <div class="card" id="tempdb-card" data-ai-panel="tempdb"><div class="panel-heading"><h2>TempDB Usage</h2><button type="button" class="btn ghost panel-ai" data-ai-scope="tempdb" disabled>Ask AI</button></div><div class="card-sub">Space allocation breakdown</div><div id="tempdb"></div></div>
     </div>
-
+    </section>
   </main>
 </div>
 
 <!-- About / Info modal -->
 <div class="modal-backdrop" id="about-backdrop">
-  <div class="modal confirm-modal" style="max-width:520px;">
-    <div class="confirm-icon" style="background:rgba(14,165,233,0.12);color:var(--cp-accent);box-shadow:0 0 0 6px rgba(14,165,233,0.05);">i</div>
-    <h2>SQL Performance Dashboard</h2>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="about-title" aria-describedby="disclaimer-hint" style="max-width:700px;max-height:90vh;overflow-y:auto;">
+    <div style="display:flex;align-items:center;gap:16px;margin-bottom:16px;">
+      <img src="/sql-dashboard-logo.png" width="64" height="64" alt="" style="border-radius:12px;">
+      <div>
+        <h2 id="about-title">About and responsible use</h2>
+        <div style="font-size:13px;color:var(--cp-text-muted);">SQL Pulse · v1.4.2</div>
+      </div>
+    </div>
+    <p id="disclaimer-hint" style="font-size:12px;color:var(--cp-text-muted);">Review this notice before using the dashboard.</p>
     <div class="sub" style="text-align:left;">
-      <p style="margin:6px 0;text-align:center;">Multi-instance live monitoring for SQL Server, Azure SQL Database, and SQL Managed Instance.</p>
-      <p style="margin:12px 0 6px;"><b>Created by</b> <span class="sig" style="color:var(--cp-accent);font-weight:600;">Luis Fernando Borbon</span> · v1.0 · © 2026</p>
-      <p style="margin:10px 0;font-size:12.5px;color:var(--cp-text-muted);">Provided <b>as-is</b>, without warranty of any kind. Not affiliated with or endorsed by Microsoft. Uses read-only DMV queries; verify all recommendations before applying to production.</p>
+      <p>Multi-instance monitoring for SQL Server, Azure SQL Database, and SQL Managed Instance.</p>
+      <h3 style="font-size:13px;margin:16px 0 4px;">Independent software, no warranty</h3>
+      <p>Created by Luis Fernando Borbon as an independent project. Not an official Microsoft or GitHub product, and not affiliated with or endorsed by either company. Provided <b>as-is</b>, without warranty or support commitment, under the MIT License. Use at your own risk.</p>
+      <h3 style="font-size:13px;margin:16px 0 4px;">Production safety and permissions</h3>
+      <p>Connect only to systems you are authorized to access. Use least-privilege accounts and appropriate DMV permissions. Collection is read-only, but polling and custom counters can add workload. The manual <b>Kill Session</b> action changes server state and can interrupt work or trigger rollback; it requires explicit confirmation and SQL permissions. Generated index and plan scripts are suggestions, not automatic changes. Review and test them before production use.</p>
+      <h3 style="font-size:13px;margin:16px 0 4px;">AI privacy and charges</h3>
+      <p>AI answers may be incomplete or incorrect and are not a substitute for qualified review. Cloud or network providers receive the approved question and SQL context, which can include query text, database names, and measurements. Review the exact payload and destination before every send. Do not disclose confidential data unless your organization permits it. Provider retention, licensing, quotas, and charges apply. A local endpoint does not guarantee that its model never makes network calls. AI has no SQL execution or system tools in this app.</p>
+      <h3 style="font-size:13px;margin:16px 0 4px;">Local data and diagnostic limits</h3>
+      <p>Saved passwords and API credentials are encrypted with AES-256-GCM and a Windows DPAPI-protected key. Registry metadata, history, and browser snapshots are not encrypted by this app. Protect the Windows account, data folder, and backups. Metrics can be delayed, cumulative, or unavailable because of permissions. Health indicators are heuristics, not availability, backup, or recovery guarantees.</p>
       <p style="margin:10px 0;font-size:12.5px;">
         <b>Source:</b> <a href="https://github.com/LuchoBorbon76/SQLDashboard" target="_blank" rel="noopener" style="color:var(--cp-accent);">github.com/LuchoBorbon76/SQLDashboard</a>
       </p>
+      <p style="font-size:12px;color:var(--cp-text-muted);">Created by <span class="sig">Luis Fernando Borbon</span> · © 2026 · MIT License</p>
     </div>
     <div class="actions" style="margin-top:18px;">
       <button class="btn" id="about-close">Close</button>
@@ -529,6 +582,7 @@ tr.clickable:hover td:first-child{border-left:3px solid var(--cp-accent);padding
     <div class="confirm-icon" id="confirm-icon">⚠</div>
     <h2 id="confirm-title">Confirm</h2>
     <div class="sub" id="confirm-message">Are you sure?</div>
+    <details id="confirm-payload" hidden><summary>Show exact data sent</summary><pre id="confirm-payload-text" tabindex="0"></pre></details>
     <div class="actions" style="margin-top:24px;">
       <button class="btn ghost" id="confirm-cancel">Cancel</button>
       <button class="btn danger" id="confirm-ok">Delete</button>
@@ -550,10 +604,11 @@ tr.clickable:hover td:first-child{border-left:3px solid var(--cp-accent);padding
 
 <!-- Add server modal -->
 <div class="modal-backdrop" id="modal-backdrop">
-  <div class="modal">
+  <div class="modal connection-modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
     <h2 id="modal-title">Add SQL Server</h2>
-    <div class="sub" id="modal-sub">Test connection runs before saving. Credentials are stored locally in <code>servers.json</code>.</div>
-    <div class="warning-box"><b>⚠  Note:</b> passwords are stored in plain text in servers.json on this machine. Prefer Windows or Entra ID Integrated auth when possible.</div>
+    <div class="sub" id="modal-sub">Test your connection before saving. Use a least-privilege account.</div>
+    <div class="connection-security">Passwords are encrypted locally with AES-256-GCM and Windows DPAPI. Connection metadata stays in <code>servers.json</code>.</div>
+    <div class="connection-grid">
     <div class="field">
       <label>Display name</label>
       <input type="text" id="f-name" placeholder="Prod SQL West">
@@ -562,55 +617,77 @@ tr.clickable:hover td:first-child{border-left:3px solid var(--cp-accent);padding
       <label>Group (optional)</label>
       <input type="text" id="f-group" list="f-group-list" placeholder="Production / Staging / Lab" maxlength="40">
       <datalist id="f-group-list"></datalist>
-      <div class="hint">Servers with the same group name are grouped together in the sidebar.</div>
+      <div class="hint">Organize connections in the sidebar.</div>
     </div>
-    <div class="field">
+    <div class="field connection-wide">
       <label>Server address</label>
       <input type="text" id="f-server" placeholder="myserver.database.windows.net or HOST\INSTANCE">
       <div class="hint">Format: <code>host\instance</code>, <code>tcp:host,port</code>, or <code>*.database.windows.net</code></div>
+    </div>
+    <div class="field">
+      <label>SQL target</label>
+      <select id="f-target-type">
+        <option value="auto">Auto-detect from endpoint</option>
+        <option value="sql-server">SQL Server</option>
+        <option value="azure-sqldb">Azure SQL Database</option>
+        <option value="azure-mi">Azure SQL Managed Instance</option>
+      </select>
     </div>
     <div class="field">
       <label>Authentication</label>
       <select id="f-auth">
         <option value="windows">Windows Integrated (SSPI)</option>
         <option value="sqlauth">SQL Server Authentication</option>
-        <option value="azuread-integrated">Entra ID Integrated (silent, uses your Windows account)</option>
+        <option value="azuread-integrated">Entra ID - existing Azure CLI session</option>
         <option value="azuread-password">Entra ID Password</option>
-        <option value="azuread-interactive">Entra ID Interactive / MFA (browser popup, first time only)</option>
+        <option value="azuread-interactive">Microsoft browser sign-in (recommended)</option>
+        <option value="azuread-device-code">Microsoft device code (alternative)</option>
       </select>
     </div>
     <div class="field" id="f-user-field" style="display:none;">
       <label id="f-user-label">Username</label>
       <input type="text" id="f-user" placeholder="username or user@domain.com">
+      <div class="hint" id="f-user-hint">Account used to connect to SQL.</div>
     </div>
     <div class="field" id="f-pw-field" style="display:none;">
       <label>Password <span id="f-pw-existing-hint" style="display:none;font-weight:400;color:var(--cp-text-muted);font-size:11px;">(leave blank to keep existing)</span></label>
       <input type="password" id="f-pw" placeholder="•••••••">
     </div>
-    <div class="field" id="f-database-field">
+    <div class="field" id="f-tenant-field" style="display:none;">
+      <label>Entra tenant (optional)</label>
+      <input type="text" id="f-tenant" placeholder="Tenant ID or domain" maxlength="253">
+      <div class="hint">Use the SQL resource's tenant for cross-tenant sign-in.</div>
+    </div>
+    <div class="field connection-wide" id="f-database-field">
       <label>Database <span id="f-database-req" style="color:var(--cp-danger);display:none;">*</span></label>
-      <div style="display:flex;gap:6px;">
-        <input type="text" id="f-database" list="f-database-list" placeholder="Load databases first…" style="flex:1;" disabled>
+      <div class="connection-database">
+        <input type="text" id="f-database" list="f-database-list" placeholder="Optional - login default database">
         <button type="button" class="btn ghost" id="f-database-fetch" title="Authenticate and load databases">Load</button>
       </div>
       <datalist id="f-database-list"></datalist>
       <div class="hint" id="f-database-hint">Click <b>Load</b> after entering server + credentials to pick from the databases you have access to.</div>
     </div>
-    <div class="field" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
-      <div>
+    <div class="field">
         <label>Encrypt</label>
         <select id="f-encrypt">
           <option value="true" selected>Mandatory (recommended)</option>
           <option value="false">Optional</option>
         </select>
-      </div>
-      <div>
+    </div>
+    <div class="field">
         <label>Trust Server Certificate</label>
         <select id="f-trustcert">
           <option value="true" selected>Yes (skip cert validation)</option>
           <option value="false">No (validate CA chain)</option>
         </select>
-      </div>
+    </div>
+    </div>
+    <div id="connection-status" class="connection-status" role="status" aria-live="polite"></div>
+    <div id="sql-signin" hidden style="margin-top:8px;padding:10px;background:var(--cp-accent-soft);border:1px solid var(--cp-border);border-radius:8px;font-size:12px;">
+      <span id="sql-signin-code-row">Enter code <strong id="sql-signin-code" style="font-family:Consolas,monospace;user-select:all;"></strong> in the Microsoft sign-in tab.</span>
+      <button type="button" id="sql-signin-copy" class="btn ghost" style="padding:4px 8px;margin-left:6px;">Copy code</button>
+      <span id="sql-signin-browser-message" hidden>Sign in in the Microsoft tab; no code is needed. If a passkey fails, choose “Sign in another way”.</span>
+      <a id="sql-signin-link" href="https://login.microsoft.com/device" target="_blank" rel="noopener noreferrer" style="margin-left:8px;color:var(--cp-link);">Open Microsoft sign-in</a>
     </div>
     <div class="error-banner" id="modal-err" style="display:none;"></div>
     <div class="actions">
@@ -623,63 +700,8 @@ tr.clickable:hover td:first-child{border-left:3px solid var(--cp-accent);padding
 <!-- Custom counters modal -->
 <div class="modal-backdrop" id="counters-backdrop">
   <div class="modal modal-lg">
-    <h2>Custom counters — <span id="counters-server-name"></span></h2>
-    <div class="sub">Read-only T-SQL that returns a single scalar value. Runs each refresh cycle. Blocked keywords: INSERT/UPDATE/DELETE/DROP/CREATE/ALTER/EXEC/TRUNCATE/MERGE/GRANT/REVOKE/BACKUP/RESTORE/xp_.</div>
-
-    <div id="counters-list" style="margin-bottom:16px;"></div>
-
-    <div style="border-top:1px solid var(--cp-border);padding-top:14px;margin-top:8px;">
-      <h3 style="margin:0 0 10px;font-size:14px;font-weight:600;">Add / Edit counter</h3>
-      <input type="hidden" id="cc-id">
-      <div class="form-row">
-        <label>Name</label>
-        <input type="text" id="cc-name" maxlength="60" placeholder="Long-running requests">
-      </div>
-      <div class="form-row" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
-        <div>
-          <label>Unit (optional)</label>
-          <input type="text" id="cc-unit" maxlength="12" placeholder="ms, MB, %">
-        </div>
-        <div>
-          <label>Description</label>
-          <input type="text" id="cc-description" maxlength="200" placeholder="What does this measure?">
-        </div>
-      </div>
-      <div class="form-row">
-        <label>T-SQL (must return a single scalar)</label>
-        <textarea id="cc-sql" rows="4" style="width:100%;font-family:Consolas,'Cascadia Code',monospace;font-size:12px;padding:8px;background:var(--cp-bg);color:var(--cp-text);border:1px solid var(--cp-border);border-radius:8px;" placeholder="SELECT COUNT(*) FROM sys.dm_exec_requests WHERE total_elapsed_time > 30000"></textarea>
-      </div>
-      <div class="form-row" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;">
-        <div>
-          <label>Warn ≥</label>
-          <input type="number" id="cc-warnGt" step="any" placeholder="—">
-        </div>
-        <div>
-          <label>Critical ≥</label>
-          <input type="number" id="cc-critGt" step="any" placeholder="—">
-        </div>
-        <div>
-          <label>Warn ≤</label>
-          <input type="number" id="cc-warnLt" step="any" placeholder="—">
-        </div>
-        <div>
-          <label>Critical ≤</label>
-          <input type="number" id="cc-critLt" step="any" placeholder="—">
-        </div>
-      </div>
-      <div class="hint" style="margin-top:8px;">Leave thresholds blank to skip. Both directions are supported (e.g. warn if under X and critical if over Y).</div>
-      <div class="error-banner" id="cc-err" style="display:none;margin-top:8px;"></div>
-      <div id="cc-test-result" style="display:none;margin-top:8px;padding:8px;background:var(--cp-bg);border:1px solid var(--cp-border);border-radius:8px;font-family:Consolas,'Cascadia Code',monospace;font-size:12px;"></div>
-      <div class="actions" style="margin-top:12px;">
-        <button class="btn ghost" id="cc-clear">Clear form</button>
-        <button class="btn ghost" id="cc-test">Test</button>
-        <button class="btn" id="cc-save">Save counter</button>
-      </div>
-    </div>
-
-    <div class="actions">
-      <button class="btn ghost" id="counters-close">Close</button>
-    </div>
+    <h2>Custom counters</h2>
+    <p>Loading counter manager…</p>
   </div>
 </div>
 
@@ -692,10 +714,12 @@ tr.clickable:hover td:first-child{border-left:3px solid var(--cp-accent);padding
       <button class="btn ghost" id="alerts-tab-current">Active (<span id="alerts-current-count">0</span>)</button>
       <button class="btn ghost" id="alerts-tab-history" style="opacity:0.6;">History (<span id="alerts-history-count">0</span>)</button>
       <div style="flex:1;"></div>
-      <button class="btn ghost" id="alerts-clear" title="Clear the history log for this server">Clear log</button>
+      <button class="btn ghost" id="alerts-clear" title="Clear recorded history, not active issues">Clear history</button>
     </div>
     <div id="alerts-body" style="min-height:150px;"></div>
+    <div id="alerts-status" class="hint" role="status" aria-live="polite"></div>
     <div class="actions">
+      <button type="button" class="btn ghost" id="alerts-email-settings">Configure email</button>
       <button class="btn ghost" id="alerts-close">Close</button>
     </div>
   </div>
@@ -704,39 +728,8 @@ tr.clickable:hover td:first-child{border-left:3px solid var(--cp-accent);padding
 <!-- Ask AI modal -->
 <div class="modal-backdrop" id="ai-backdrop">
   <div class="modal modal-lg">
-    <h2>🤖 Ask AI</h2>
-    <div class="sub">Sends the current metrics + a compact history sample from the active server to your local Ollama instance. Nothing leaves this machine.</div>
-    <div id="ai-status" style="font-size:12px;color:var(--cp-text-muted);margin-bottom:8px;"></div>
-
-    <div class="form-row" style="display:grid;grid-template-columns:2fr 1fr;gap:8px;align-items:end;">
-      <div>
-        <label>Model</label>
-        <select id="ai-model" style="width:100%;"><option value="">Loading…</option></select>
-      </div>
-      <div>
-        <label>&nbsp;</label>
-        <button type="button" class="btn ghost" id="ai-refresh-models" style="width:100%;">Reload models</button>
-      </div>
-    </div>
-
-    <div class="form-row">
-      <label>Your question</label>
-      <textarea id="ai-question" rows="3" style="width:100%;padding:8px;background:var(--cp-bg);color:var(--cp-text);border:1px solid var(--cp-border);border-radius:8px;" placeholder="What's the biggest performance problem right now?"></textarea>
-      <div class="hint">Suggestions:
-        <a href="#" class="ai-suggest">What's the biggest performance issue right now?</a> ·
-        <a href="#" class="ai-suggest">Analyze the top waits and recommend action</a> ·
-        <a href="#" class="ai-suggest">Which of the top queries should I tune first, and why?</a> ·
-        <a href="#" class="ai-suggest">Are the missing indexes worth creating? Rank them.</a> ·
-        <a href="#" class="ai-suggest">Summarize the health of this server in 5 bullets</a>
-      </div>
-    </div>
-
-    <div class="actions" style="margin-top:8px;">
-      <button class="btn ghost" id="ai-close">Close</button>
-      <button class="btn" id="ai-ask">Ask</button>
-    </div>
-
-    <div id="ai-answer" style="display:none;margin-top:14px;padding:12px;background:var(--cp-bg);border:1px solid var(--cp-border);border-radius:8px;max-height:50vh;overflow-y:auto;white-space:pre-wrap;font-size:13px;line-height:1.5;"></div>
+    <h2>Ask AI</h2>
+    <p>Loading provider settings...</p>
   </div>
 </div>
 
@@ -746,18 +739,99 @@ let refreshSeconds = Math.max(MIN_INTERVAL, Number(localStorage.getItem('refresh
 let countdown = refreshSeconds;
 let servers = [];
 let activeServerId = null;
-let fetching = false;
+let dashboardView = 'overview';
+let dashboardStarted = false;
+let detailGeneration = 0;
+let fleetUI, fleetHelpers;
+const metricsInFlight = new Map();
 let paused = false;
+const pauseUpdates = new Set();
+const pauseRevisions = new Map();
+function currentViewPaused(){
+  return dashboardView === 'overview' ? paused : servers.find(server => server.id === activeServerId)?.monitoringPaused === true;
+}
+function updatePauseControls(){
+  const server = servers.find(item => item.id === activeServerId);
+  const stopped = currentViewPaused(), overview = dashboardView === 'overview';
+  const button = el('pause-btn'), spans = button.querySelectorAll('span');
+  if (spans[0]) spans[0].textContent = stopped ? '▶' : '⏸';
+  if (spans[1]) spans[1].textContent = overview ? stopped ? 'Resume view' : 'Pause view' : stopped ? 'Resume server' : 'Pause server';
+  button.title = overview ? 'Pause only this browser view; background monitoring and server pause states are unchanged' :
+    `${stopped ? 'Resume' : 'Pause'} monitoring only for ${server?.name || 'the selected server'}; keep its last sample`;
+  button.disabled = !overview && (!server || pauseUpdates.has(server.id));
+  button.setAttribute('aria-pressed', String(stopped));
+  el('refresh-btn').textContent = !overview && stopped ? 'Read cached sample' : 'Refresh now';
+  el('refresh-btn').title = !overview && stopped
+    ? 'Read the last collected sample without running SQL; Resume server to collect new samples'
+    : overview && stopped ? 'Refresh this view manually; server monitoring pause states are unchanged' : 'Refresh collected metrics';
+  el('countdown').textContent = stopped ? '—' : formatCountdown(countdown);
+  el('live-dot').classList.toggle('paused', stopped);
+}
+function applyServerPause(id, monitoringPaused, collecting = false){
+  const server = servers.find(item => item.id === id);
+  if (!server) return;
+  if (server.monitoringPaused !== monitoringPaused) pauseRevisions.set(id, (pauseRevisions.get(id) || 0) + 1);
+  server.monitoringPaused = monitoringPaused;
+  fleetUI?.updateServer({ id, monitoringPaused, collecting });
+  renderServerList();
+  if (dashboardView === 'detail' && activeServerId === id) {
+    const data = serverState.get(id)?.data;
+    if (data) render(data, serverState.get(id).prevData);
+    else renderEmpty();
+    updatePauseControls();
+    if (monitoringPaused) setStatus('paused', collecting ? 'Paused · finishing in-flight sample' : data ? 'Paused · last collected sample retained' : 'Paused · no collected sample available');
+  }
+}
 // Per-server client-side cache: id -> { data, prevData, lastFetchAt }
 // Lets us render cached data instantly when switching servers, without polling
 // inactive ones.
 const serverState = new Map();
+let classifySqlEndpoint;
+const sqlEndpointReady = import('/sql-endpoint.js').then(module => {
+  classifySqlEndpoint = module.classifySqlEndpoint;
+});
 function stateFor(id){
   if(!serverState.has(id)) serverState.set(id, { data:null, prevData:null, lastFetchAt:0 });
   return serverState.get(id);
 }
+function invalidateClientMetrics(id){
+  metricsInFlight.get(id)?.controller?.abort();
+  serverState.delete(id);
+  metricsInFlight.delete(id);
+}
 
 const el = (id) => document.getElementById(id);
+let sharedComputeHealth;
+const healthReady = import('/health.js').then(module => {
+  sharedComputeHealth = module.computeHealth;
+}).catch(error => {
+  console.error('Health interface failed to load:', error);
+  throw error;
+});
+const fleetReady = import('/fleet-ui.js').then(module => {
+  fleetHelpers = module;
+  fleetUI = module.createFleetUI({
+    root: el('overview-view'),
+    onSelect: setActiveServer,
+    onUpdate(data, summary) {
+      for (const row of data.servers) {
+        const server = servers.find(item => item.id === row.id);
+        if (server) server.monitoringPaused = row.monitoringPaused === true;
+      }
+      if (dashboardView !== 'overview') return;
+      renderFleetHealth(summary);
+      updateEmailMonitorStatus(data.monitor);
+      el('current-server-sub').textContent = `${summary.total} configured servers · lightweight samples${data.monitor?.enabled ? ' · background monitoring enabled' : ''}${data.monitor?.lastCycleAt ? ' · last cycle '+fmtDate(data.monitor.lastCycleAt) : ''}`;
+      renderServerList();
+    },
+    onStatus(state, text) {
+      if (dashboardView === 'overview') setStatus(paused ? 'paused' : state === 'error' ? 'err' : state === 'loading' ? 'stale' : 'ok', paused ? 'View paused · background monitoring unchanged' : text);
+    },
+  });
+}).catch(error => {
+  console.error('Fleet interface failed to load:', error);
+  throw error;
+});
 const fmtN = (n)=> n==null?"-":Number(n).toLocaleString(undefined,{maximumFractionDigits:1});
 const fmtInt = (n)=> n==null?"-":Number(n).toLocaleString();
 const compatLabel = (c)=>{
@@ -790,6 +864,11 @@ function confirmDialog(title, message, okLabel, opts){
     el('confirm-message').textContent = message || '';
     el('confirm-ok').textContent = okLabel || 'Delete';
     const modal = document.querySelector('.confirm-modal');
+    const payload = typeof options.payload === 'string' ? options.payload : '';
+    el('confirm-payload').hidden = !payload;
+    el('confirm-payload').open = false;
+    el('confirm-payload-text').textContent = payload;
+    modal.classList.toggle('with-payload', Boolean(payload));
     const iconEl = el('confirm-icon');
     const destructive = options.destructive !== false; // default: destructive
     modal.classList.toggle('destructive', destructive);
@@ -805,9 +884,21 @@ function confirmDialog(title, message, okLabel, opts){
       if(downTarget && downTarget.id==='confirm-backdrop' && e.target.id==='confirm-backdrop'){ cleanup(); resolve(false); }
       downTarget = null;
     };
-    const onKey = (e)=>{ if(e.key==='Escape'){ cleanup(); resolve(false); } if(e.key==='Enter'){ cleanup(); resolve(true); } };
+    const onKey = (e)=>{
+      if(e.key==='Escape'){ cleanup(); resolve(false); }
+      if(e.key==='Enter' && !payload){ cleanup(); resolve(true); }
+      if(e.key==='Tab' && payload){
+        const nodes = [...modal.querySelectorAll('button,summary,[tabindex="0"]')].filter(node=>!node.disabled && node.getClientRects().length);
+        const first = nodes[0], last = nodes[nodes.length-1];
+        if(e.shiftKey && document.activeElement===first){ e.preventDefault(); last?.focus(); }
+        else if(!e.shiftKey && document.activeElement===last){ e.preventDefault(); first?.focus(); }
+      }
+    };
     function cleanup(){
       bd.classList.remove('show');
+      el('confirm-payload-text').textContent = '';
+      el('confirm-payload').hidden = true;
+      modal.classList.remove('with-payload');
       el('confirm-ok').removeEventListener('click', onOk);
       el('confirm-cancel').removeEventListener('click', onCancel);
       bd.removeEventListener('mousedown', onDown);
@@ -833,15 +924,7 @@ el('theme-btn').addEventListener('click', (e)=>{
   e.stopPropagation();
   el('theme-menu').classList.toggle('open');
 });
-// Info / About modal
-el('info-btn').addEventListener('click', () => el('about-backdrop').classList.add('show'));
-el('about-close').addEventListener('click', () => el('about-backdrop').classList.remove('show'));
-let aboutMouseDownTarget = null;
-el('about-backdrop').addEventListener('mousedown', (e)=>{ aboutMouseDownTarget = e.target; });
-el('about-backdrop').addEventListener('mouseup', (e)=>{
-  if(aboutMouseDownTarget && aboutMouseDownTarget.id==='about-backdrop' && e.target.id==='about-backdrop') el('about-backdrop').classList.remove('show');
-  aboutMouseDownTarget = null;
-});
+const disclaimerReady = import('/disclaimer-ui.js').then(({ initDisclaimer }) => initDisclaimer());
 el('theme-menu').querySelectorAll('.theme-opt').forEach(btn=>{
   btn.addEventListener('click', ()=>{
     const t = btn.dataset.theme;
@@ -857,16 +940,38 @@ document.addEventListener('click', (e)=>{
   }
 });
 updateThemeUi();
-el('refresh-btn').addEventListener('click', ()=>{ countdown = 0; fetchMetrics(); });
-el('pause-btn').addEventListener('click', ()=>{
-  paused = !paused;
-  const spans = el('pause-btn').querySelectorAll('span');
-  if (spans[0]) spans[0].textContent = paused ? '▶' : '⏸';
-  if (spans[1]) spans[1].textContent = paused ? 'Resume' : 'Pause';
-  el('pause-btn').title = paused ? 'Resume auto-refresh' : 'Pause auto-refresh';
-  el('live-dot').classList.toggle('paused', paused);
-  if(paused){ setStatus('paused','Paused'); }
-  else { countdown = refreshSeconds; setStatus('ok','Resumed'); }
+el('refresh-btn').addEventListener('click', ()=>{ countdown = refreshSeconds; refreshCurrentView(); });
+el('fleet-btn').addEventListener('click', ()=>setDashboardView('overview'));
+el('fleet-back-btn').addEventListener('click', ()=>setDashboardView('overview'));
+el('pause-btn').addEventListener('click', async ()=>{
+  if (dashboardView === 'overview') {
+    paused = !paused;
+    if (paused) { fleetUI?.stop(); setStatus('paused', 'View paused · background monitoring unchanged'); }
+    else { countdown = refreshSeconds; refreshCurrentView(); }
+    updatePauseControls();
+    return;
+  }
+  const id = activeServerId, server = servers.find(item => item.id === id);
+  if (!server || pauseUpdates.has(id)) return;
+  const monitoringPaused = !server.monitoringPaused;
+  pauseUpdates.add(id);
+  updatePauseControls();
+  try {
+    const result = await registryRequest('/api/servers/'+encodeURIComponent(id)+'/monitoring', {
+      method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ monitoringPaused }),
+    });
+    applyServerPause(id, result.monitoringPaused, result.collecting);
+    if (!result.monitoringPaused && dashboardView === 'detail' && activeServerId === id) {
+      countdown = refreshSeconds;
+      pauseUpdates.delete(id);
+      fetchMetrics();
+    }
+  } catch(error) {
+    if (dashboardView === 'detail' && activeServerId === id) setStatus('err', 'Monitoring update failed: '+error.message);
+  } finally {
+    pauseUpdates.delete(id);
+    updatePauseControls();
+  }
 });
 
 // Interval selector
@@ -897,13 +1002,13 @@ el('modal-backdrop').addEventListener('mouseup', (e)=>{
 });
 el('f-auth').addEventListener('change', ()=>{ updateAuthFields(); updateDatabaseRequired(); });
 el('f-server').addEventListener('input', updateDatabaseRequired);
+el('f-target-type').addEventListener('change', updateDatabaseRequired);
 el('modal-save').addEventListener('click', saveServer);
 el('f-database-fetch').addEventListener('click', fetchDatabaseList);
 
 // -------------------------------------------------------
-// Custom counters manager
+// Saved comparison baseline
 // -------------------------------------------------------
-el('counters-btn').addEventListener('click', openCountersModal);
 el('snapshot-btn').addEventListener('click', () => {
   const st = serverState.get(activeServerId);
   if (!st || !st.data) { alert('No data yet.'); return; }
@@ -922,25 +1027,6 @@ el('snapshot-btn').addEventListener('click', () => {
   }, 1500);
   render(st.data, st.snapshot.data);
 });
-el('export-btn').addEventListener('click', () => {
-  const st = serverState.get(activeServerId);
-  if (!st || !st.data) { alert('No data yet.'); return; }
-  const s = servers.find(x=>x.id===activeServerId);
-  const payload = {
-    exported_at: new Date().toISOString(),
-    server: { id: s.id, name: s.name, server: s.server, engine: st.data.engine, engine_edition: st.data.engine_edition },
-    health: computeHealth(st.data),
-    metrics: st.data,
-    history: st.history || [],
-  };
-  const blob = new Blob([JSON.stringify(payload, null, 2)], {type:'application/json'});
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = `${s.name.replace(/[^A-Za-z0-9._-]/g,'_')}-${new Date().toISOString().replace(/[:.]/g,'-')}.json`;
-  document.body.appendChild(a); a.click(); a.remove();
-  setTimeout(()=>URL.revokeObjectURL(a.href), 5000);
-});
-
 // -------------------------------------------------------
 // Exit: shut down the dashboard server and close the tab
 // -------------------------------------------------------
@@ -975,14 +1061,32 @@ el('exit-btn').addEventListener('click', async () => {
 // Alerts: state-transition log per server (localStorage)
 // -------------------------------------------------------
 let alertsTab = 'current'; // 'current' | 'history'
+let clearingAlertLog = false;
 el('alerts-btn').addEventListener('click', openAlertsModal);
 el('alerts-close').addEventListener('click', () => el('alerts-backdrop').classList.remove('show'));
 el('alerts-tab-current').addEventListener('click', () => { alertsTab = 'current'; renderAlertsBody(); });
 el('alerts-tab-history').addEventListener('click', () => { alertsTab = 'history'; renderAlertsBody(); });
 el('alerts-clear').addEventListener('click', async () => {
-  if (!(await confirmDialog('Clear alert log?', 'This removes the stored history entries for this server from your browser. Active issues are recomputed on the next refresh.'))) return;
-  localStorage.removeItem('alerts-'+activeServerId);
-  renderAlertsBody();
+  if (clearingAlertLog || !activeServerId) return;
+  const serverId = activeServerId, name = servers.find(server=>server.id===serverId)?.name || serverId;
+  clearingAlertLog = true;
+  el('alerts-clear').disabled = true;
+  el('alerts-status').textContent = '';
+  try {
+    const approved = await confirmDialog(`Clear history for ${name}?`, 'This deletes recorded alert transitions from this browser only. Active warnings remain until the underlying SQL condition is resolved.', 'Clear history');
+    if (!approved) return;
+    localStorage.removeItem('alerts-'+serverId);
+    if (activeServerId === serverId) {
+      alertsTab = 'history';
+      renderAlertsBody();
+      el('alerts-status').textContent = 'History cleared. Active warnings are unchanged; see Active for current issues.';
+    }
+  } catch(error) {
+    if (activeServerId === serverId) el('alerts-status').textContent = `History could not be cleared: ${error.message}`;
+  } finally {
+    clearingAlertLog = false;
+    el('alerts-clear').disabled = false;
+  }
 });
 let alertsModalMouseDownTarget = null;
 el('alerts-backdrop').addEventListener('mousedown', (e)=>{ alertsModalMouseDownTarget = e.target; });
@@ -1001,6 +1105,7 @@ function saveAlertLog(id, log){
 
 // Compare current health issues vs previous set; emit log entries for new items and resolved items.
 function recordAlertTransitions(serverId, health, prevHealth){
+  if (health.level === 'unknown') { updateAlertBadge(); return; }
   const log = loadAlertLog(serverId);
   const nowIso = new Date().toISOString();
   const prevSet = new Set([...(prevHealth?.critical||[]), ...(prevHealth?.warning||[])]);
@@ -1016,7 +1121,7 @@ function recordAlertTransitions(serverId, health, prevHealth){
 }
 function updateAlertBadge(){
   const badge = el('alerts-count-badge');
-  if (!activeServerId) { badge.classList.remove('show'); return; }
+  if (dashboardView !== 'detail' || !activeServerId) { badge.classList.remove('show'); return; }
   const st = serverState.get(activeServerId);
   if (!st?.data) { badge.classList.remove('show'); return; }
   const h = computeHealth(st.data);
@@ -1030,9 +1135,17 @@ function updateAlertBadge(){
   }
 }
 
-function openAlertsModal(){
-  if (!activeServerId) { alert('Select a server first.'); return; }
+async function openAlertsModal(){
+  if (dashboardView !== 'detail' || !activeServerId) {
+    await alertsReady;
+    if (!alertSettingsController) {
+      showRegistryError('Email alerts unavailable', new Error(el('alert-settings-btn').title));
+      return;
+    }
+    return alertSettingsController.open();
+  }
   alertsTab = 'current';
+  el('alerts-status').textContent = '';
   el('alerts-backdrop').classList.add('show');
   renderAlertsBody();
 }
@@ -1043,15 +1156,18 @@ function renderAlertsBody(){
   const log = loadAlertLog(activeServerId);
   el('alerts-history-count').textContent = log.length;
 
-  if (!st?.data) {
-    el('alerts-current-count').textContent = '0';
-    el('alerts-body').innerHTML = '<div class="hint">No data yet.</div>';
-    return;
-  }
-  const h = computeHealth(st.data);
-  el('alerts-current-count').textContent = (h.critical.length + h.warning.length);
+  const h = st?.data ? computeHealth(st.data) : null;
+  el('alerts-current-count').textContent = !h || h.level === 'unknown' ? '—' : (h.critical.length + h.warning.length);
 
   if (alertsTab === 'current') {
+    if (!h) {
+      el('alerts-body').innerHTML = '<div class="hint">No data yet. Recorded transitions are available in History.</div>';
+      return;
+    }
+    if (h.level === 'unknown') {
+      el('alerts-body').innerHTML = '<div class="hint">Health is unknown. No current assessment is available; this does not mean the instance is healthy.</div>';
+      return;
+    }
     if (h.critical.length + h.warning.length === 0) {
       el('alerts-body').innerHTML = '<div style="padding:20px;text-align:center;color:var(--cp-success);"><b>✓ No active alerts.</b> This instance is healthy.</div>';
       return;
@@ -1079,79 +1195,50 @@ function renderAlertsBody(){
 }
 
 // -------------------------------------------------------
-// Ask AI (local Ollama)
+// Ask AI provider UI
 // -------------------------------------------------------
-el('ai-btn').addEventListener('click', openAiModal);
-el('ai-close').addEventListener('click', () => el('ai-backdrop').classList.remove('show'));
-el('ai-refresh-models').addEventListener('click', loadAiModels);
-el('ai-ask').addEventListener('click', askAi);
-document.querySelectorAll('.ai-suggest').forEach(a => {
-  a.addEventListener('click', (e) => { e.preventDefault(); el('ai-question').value = a.textContent; el('ai-question').focus(); });
-});
-let aiModalMouseDownTarget = null;
-el('ai-backdrop').addEventListener('mousedown', (e)=>{ aiModalMouseDownTarget = e.target; });
-el('ai-backdrop').addEventListener('mouseup', (e)=>{
-  if(aiModalMouseDownTarget && aiModalMouseDownTarget.id==='ai-backdrop' && e.target.id==='ai-backdrop') el('ai-backdrop').classList.remove('show');
-  aiModalMouseDownTarget = null;
-});
-
-async function openAiModal(){
-  if (!activeServerId) { alert('Select a server first.'); return; }
-  el('ai-backdrop').classList.add('show');
-  el('ai-answer').style.display = 'none';
-  el('ai-answer').innerHTML = '';
-  if (!el('ai-model').dataset.loaded) await loadAiModels();
-}
-async function loadAiModels(){
-  const sel = el('ai-model');
-  sel.innerHTML = '<option value="">Loading…</option>';
-  el('ai-status').textContent = 'Checking Ollama…';
-  try {
-    const r = await fetch('/api/ai/models');
-    const data = await r.json();
-    if (!r.ok) throw new Error(data.error || ('HTTP ' + r.status));
-    const models = data.models || [];
-    if (models.length === 0) {
-      sel.innerHTML = '<option value="">No models installed</option>';
-      el('ai-status').innerHTML = `<span style="color:var(--cp-danger)">Ollama has no chat models. Run <code>ollama pull llama3.1:8b</code>.</span>`;
-      return;
-    }
-    const saved = localStorage.getItem('ai-model') || 'llama3.1:8b';
-    sel.innerHTML = models.map(m => `<option value="${esc(m)}" ${m===saved?'selected':''}>${esc(m)}</option>`).join('');
-    if (!models.includes(saved)) sel.value = models[0];
-    el('ai-model').dataset.loaded = '1';
-    el('ai-status').innerHTML = `<span style="color:var(--cp-success)">✓ Ollama connected · ${models.length} model${models.length!==1?'s':''}</span> · <code style="font-size:11px;">${esc(data.ollamaUrl||'')}</code>`;
-    sel.addEventListener('change', () => localStorage.setItem('ai-model', sel.value), { once: true });
-  } catch (e) {
-    sel.innerHTML = '<option value="">Ollama unreachable</option>';
-    el('ai-status').innerHTML = `<span style="color:var(--cp-danger)">✗ ${esc(e.message)}</span>`;
+function optionalModuleError(name, error, buttonIds){
+  console.error(`${name} interface failed to load:`, error);
+  for (const id of buttonIds) {
+    const button = el(id);
+    if (!button) continue;
+    button.disabled = true;
+    button.title = `${name} interface failed to load: ${error.message}`;
   }
 }
-async function askAi(){
-  const model = el('ai-model').value;
-  const question = el('ai-question').value.trim();
-  if (!model) { alert('Pick a model first.'); return; }
-  if (!question) { alert('Enter a question.'); return; }
-  localStorage.setItem('ai-model', model);
-  const btn = el('ai-ask'); btn.disabled = true; btn.textContent = 'Thinking…';
-  el('ai-answer').style.display = 'block';
-  el('ai-answer').textContent = 'Sending metrics + question to ' + model + '…';
-  const started = Date.now();
+let aiController;
+const aiReady = import('/ai-ui.js').then(({ initAiUi }) => {
+  aiController = initAiUi({
+    el, esc, getActiveServerId: () => dashboardView === 'detail' ? activeServerId : null,
+    getServerName: id => servers.find(server => server.id === id)?.name || id,
+    getServerData: id => serverState.get(id)?.data,
+    renderSimpleMd, confirmDialog, fmtInt,
+  });
+  return aiController;
+}).catch(error => {
+  optionalModuleError('AI', error, ['ai-btn']);
+  document.querySelectorAll('[data-ai-scope]').forEach(button => { button.disabled = true; });
+});
+document.addEventListener('click', async event => {
+  const button = event.target.closest('[data-ai-scope]');
+  if (!button || !el('detail-view').contains(button)) return;
+  const data = serverState.get(activeServerId)?.data;
+  if (button.disabled || dashboardView !== 'detail' || !activeServerId || !data || serverState.get(activeServerId)?.lastError) {
+    showRegistryError('AI analysis unavailable', new Error('Select a server with a usable sample for this visual first.'));
+    return;
+  }
+  const selection = {
+    serverId: activeServerId, scope: button.dataset.aiScope,
+    metricId: button.dataset.aiMetric || button.dataset.aiCounterId || undefined,
+    title: button.closest('.card')?.querySelector('h2')?.textContent || button.closest('.kpi')?.querySelector('.label')?.textContent,
+    visualSampleAt: data.generated_at,
+  };
   try {
-    const r = await fetch('/api/ai/ask', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ serverId: activeServerId, question, model }),
-    });
-    const data = await r.json();
-    if (!r.ok) throw new Error(data.error || ('HTTP ' + r.status));
-    const secs = ((Date.now() - started)/1000).toFixed(1);
-    // Very lightweight markdown-ish rendering: escape then convert bold/italic/code/lists/newlines
-    const html = renderSimpleMd(data.answer || '(empty response)');
-    el('ai-answer').innerHTML = html + `<div style="margin-top:10px;font-size:11px;color:var(--cp-text-muted);border-top:1px solid var(--cp-border);padding-top:6px;">model: ${esc(data.model)} · context: ${fmtInt(data.contextBytes||0)} bytes · ${secs}s</div>`;
-  } catch (e) {
-    el('ai-answer').innerHTML = `<span style="color:var(--cp-danger)">Failed: ${esc(e.message)}</span>`;
-  } finally { btn.disabled = false; btn.textContent = 'Ask'; }
-}
+    await aiReady;
+    if (!aiController) throw new Error('The AI interface failed to load. Reload the dashboard to retry.');
+    await aiController.askVisual(selection);
+  } catch (error) { showRegistryError('AI analysis unavailable', error); }
+});
 function renderSimpleMd(text) {
   let s = esc(text);
   // Fenced code blocks
@@ -1170,140 +1257,138 @@ function renderSimpleMd(text) {
   s = s.replace(/(<li>[\s\S]+?<\/li>)(?!\s*<li>)/g, '<ul style="margin:6px 0;padding-left:22px;">$1</ul>');
   return s;
 }
-el('counters-close').addEventListener('click', () => el('counters-backdrop').classList.remove('show'));
-let ccModalMouseDownTarget = null;
-el('counters-backdrop').addEventListener('mousedown', (e)=>{ ccModalMouseDownTarget = e.target; });
-el('counters-backdrop').addEventListener('mouseup', (e)=>{
-  if(ccModalMouseDownTarget && ccModalMouseDownTarget.id==='counters-backdrop' && e.target.id==='counters-backdrop') el('counters-backdrop').classList.remove('show');
-  ccModalMouseDownTarget = null;
+let countersController;
+const countersReady = import('/counters-ui.js').then(({ initCountersUi }) => {
+  countersController = initCountersUi({
+    el, esc, getActiveServerId: () => dashboardView === 'detail' ? activeServerId : null,
+    getServerName: id => servers.find(server => server.id === id)?.name || id,
+    getServerEngine: id => {
+      const server = servers.find(item => item.id === id) || {};
+      return serverState.get(id)?.data?.engine || classifySqlEndpoint(server.server, server.connectionType, server.engineEdition).kind;
+    },
+    getLatestCounters: id => serverState.get(id)?.data?.custom_counters || [],
+    confirmDialog,
+    onChanged: async id => {
+      invalidateClientMetrics(id);
+      await loadServers();
+      if (dashboardStarted && (dashboardView === 'overview' || id === activeServerId)) await refreshCurrentView();
+    },
+    onAskAi: async selection => {
+      await aiReady;
+      if (!aiController) throw new Error('The AI interface failed to load. Reload the dashboard to retry.');
+      countersController.close();
+      await aiController.askVisual({ ...selection, title: 'Custom counter' });
+    },
+  });
+  return countersController;
+}).catch(error => {
+  optionalModuleError('Custom counters', error, ['counters-btn']);
 });
-el('cc-clear').addEventListener('click', clearCounterForm);
-el('cc-test').addEventListener('click', testCounter);
-el('cc-save').addEventListener('click', saveCounter);
-
-function clearCounterForm(){
-  ['cc-id','cc-name','cc-unit','cc-description','cc-sql','cc-warnGt','cc-critGt','cc-warnLt','cc-critLt']
-    .forEach(id => el(id).value = '');
-  el('cc-err').style.display = 'none';
-  el('cc-test-result').style.display = 'none';
+let alertSettingsController;
+function updateEmailMonitorStatus(settings){
+  if (!settings || typeof settings.enabled !== 'boolean') return;
+  el('email-monitor-status').textContent = settings.enabled
+    ? `Email monitoring enabled${settings.intervalSeconds ? ' · '+settings.intervalSeconds+'s polling' : ''}`
+    : 'Email monitoring disabled';
+  el('email-monitor-status').dataset.state = settings.enabled ? 'enabled' : 'disabled';
 }
-
-async function openCountersModal(){
-  if (!activeServerId) { alert('Select a server first.'); return; }
-  const s = servers.find(x=>x.id===activeServerId);
-  el('counters-server-name').textContent = s?.name || activeServerId;
-  clearCounterForm();
-  el('counters-backdrop').classList.add('show');
-  await renderCountersList();
-}
-
-async function renderCountersList(){
-  const r = await fetch('/api/servers/'+encodeURIComponent(activeServerId)+'/counters');
-  const list = await r.json();
-  if (!Array.isArray(list) || list.length === 0) {
-    el('counters-list').innerHTML = '<div class="hint">No custom counters yet. Add one below.</div>';
-    return;
-  }
-  el('counters-list').innerHTML = list.map(cc => {
-    const thresholds = [];
-    if (cc.warnGt != null) thresholds.push('warn ≥ '+cc.warnGt+(cc.unit||''));
-    if (cc.critGt != null) thresholds.push('crit ≥ '+cc.critGt+(cc.unit||''));
-    if (cc.warnLt != null) thresholds.push('warn ≤ '+cc.warnLt+(cc.unit||''));
-    if (cc.critLt != null) thresholds.push('crit ≤ '+cc.critLt+(cc.unit||''));
-    return `<div style="display:flex;gap:10px;padding:10px;border:1px solid var(--cp-border);border-radius:8px;margin-bottom:6px;align-items:flex-start;">
-      <div style="flex:1;min-width:0;">
-        <div style="font-weight:600;">${esc(cc.name)}${cc.unit?' <span style="color:var(--cp-text-muted);font-weight:400;">('+esc(cc.unit)+')</span>':''}</div>
-        <div style="font-size:11px;color:var(--cp-text-muted);margin-top:2px;">${thresholds.length?esc(thresholds.join(' · ')):'no thresholds'}</div>
-        <div style="font-family:Consolas,monospace;font-size:11px;color:var(--cp-text-secondary);margin-top:4px;white-space:pre-wrap;max-height:60px;overflow:hidden;">${esc(cc.sql)}</div>
-      </div>
-      <button class="btn ghost" data-cc-edit="${esc(cc.id)}" style="padding:4px 10px;">Edit</button>
-      <button class="btn ghost" data-cc-del="${esc(cc.id)}" style="padding:4px 10px;">×</button>
-    </div>`;
-  }).join('');
-  el('counters-list').querySelectorAll('[data-cc-edit]').forEach(b => {
-    b.addEventListener('click', () => {
-      const id = b.dataset.ccEdit;
-      const cc = list.find(x=>x.id===id);
-      if (!cc) return;
-      el('cc-id').value = cc.id;
-      el('cc-name').value = cc.name;
-      el('cc-unit').value = cc.unit || '';
-      el('cc-description').value = cc.description || '';
-      el('cc-sql').value = cc.sql;
-      el('cc-warnGt').value = cc.warnGt ?? '';
-      el('cc-critGt').value = cc.critGt ?? '';
-      el('cc-warnLt').value = cc.warnLt ?? '';
-      el('cc-critLt').value = cc.critLt ?? '';
-      el('cc-err').style.display = 'none';
-      el('cc-test-result').style.display = 'none';
-    });
+const alertsReady = import('/alerts-ui.js').then(({ initAlertSettingsUi }) => {
+  alertSettingsController = initAlertSettingsUi({
+    el, esc, confirmDialog,
+    onMonitoringChanged: settings => {
+      updateEmailMonitorStatus(settings);
+      if (dashboardStarted) void refreshCurrentView();
+    },
   });
-  el('counters-list').querySelectorAll('[data-cc-del]').forEach(b => {
-    b.addEventListener('click', async () => {
-      const id = b.dataset.ccDel;
-      const cc = list.find(x=>x.id===id);
-      if(!(await confirmDialog(`Remove counter "${cc?.name||id}"?`, 'This deletes it from servers.json.'))) return;
-      await fetch('/api/servers/'+encodeURIComponent(activeServerId)+'/counters/'+encodeURIComponent(id), {method:'DELETE'});
-      await renderCountersList();
-    });
-  });
-}
-
-function counterFormPayload(){
-  const parse = v => v === '' ? null : Number(v);
-  return {
-    id: el('cc-id').value || undefined,
-    name: el('cc-name').value.trim(),
-    unit: el('cc-unit').value.trim(),
-    description: el('cc-description').value.trim(),
-    sql: el('cc-sql').value.trim(),
-    warnGt: parse(el('cc-warnGt').value),
-    critGt: parse(el('cc-critGt').value),
-    warnLt: parse(el('cc-warnLt').value),
-    critLt: parse(el('cc-critLt').value),
-  };
-}
-
-async function testCounter(){
-  el('cc-err').style.display = 'none';
-  el('cc-test-result').style.display = 'none';
-  const p = counterFormPayload();
-  if (!p.sql) { el('cc-err').textContent = 'SQL is required.'; el('cc-err').style.display = 'block'; return; }
-  el('cc-test-result').textContent = 'Running…';
-  el('cc-test-result').style.display = 'block';
-  const r = await fetch('/api/servers/'+encodeURIComponent(activeServerId)+'/counters/test', {
-    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({sql: p.sql})
-  });
-  const data = await r.json();
-  if (!r.ok) {
-    el('cc-test-result').style.display = 'none';
-    el('cc-err').textContent = 'Test failed: ' + (data.error || 'unknown');
-    el('cc-err').style.display = 'block';
-  } else {
-    el('cc-test-result').innerHTML = 'Result: <b>' + esc(String(data.value ?? '—')) + '</b>' + (p.unit ? ' ' + esc(p.unit) : '');
-  }
-}
-
-async function saveCounter(){
-  el('cc-err').style.display = 'none';
-  const p = counterFormPayload();
-  if (!p.name || !p.sql) { el('cc-err').textContent = 'Name and SQL are required.'; el('cc-err').style.display = 'block'; return; }
-  const r = await fetch('/api/servers/'+encodeURIComponent(activeServerId)+'/counters', {
-    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(p)
-  });
-  const data = await r.json();
-  if (!r.ok) { el('cc-err').textContent = data.error || 'Failed to save.'; el('cc-err').style.display = 'block'; return; }
-  clearCounterForm();
-  await renderCountersList();
-  // Force next refresh to pick up counters immediately
-  const st = serverState.get(activeServerId);
-  if (st) { st.lastFetchAt = 0; }
-}
+  return alertSettingsController;
+}).catch(error => {
+  optionalModuleError('Email alerts', error, ['alert-settings-btn', 'alerts-email-settings']);
+  el('email-monitor-status').textContent = 'Email alerts unavailable';
+  el('email-monitor-status').dataset.state = 'error';
+});
+el('alerts-email-settings').addEventListener('click', () => {
+  el('alerts-backdrop').classList.remove('show');
+}, { capture: true });
 
 let editingServerId = null;   // null = add mode, otherwise = edit mode
+let editedEngineEdition = null;
+let connectionClient, connectionBrowser = null, normalizeMicrosoftDeviceUri, normalizeMicrosoftBrowserUrl;
+const copySignInCodeReady = import('/copy-signin-code.js');
+let connectionStarting = false, connectionStartSequence = 0;
+const connectionClientReady = import('/connection-request.js').then(module => {
+  normalizeMicrosoftDeviceUri = module.normalizeMicrosoftDeviceUri;
+  normalizeMicrosoftBrowserUrl = module.normalizeMicrosoftBrowserUrl;
+  const { createConnectionRequest } = module;
+  connectionClient = createConnectionRequest({ onProgress: showConnectionProgress });
+});
+
+function openSqlSignInTab(){
+  if (!['azuread-interactive','azuread-device-code'].includes(el('f-auth').value)) return;
+  connectionBrowser = window.open('about:blank', '_blank');
+  if (connectionBrowser) {
+    connectionBrowser.document.title = 'SQL Pulse - Microsoft sign-in';
+    connectionBrowser.document.body.textContent = 'SQL Pulse is preparing Microsoft sign-in. This tab will open the Microsoft page when it is ready.';
+    connectionBrowser.opener = null;
+    connectionBrowser.focus?.();
+  }
+}
+function showConnectionProgress(progress){
+  const elapsed = progress.elapsedSeconds || 0;
+  el('connection-status').textContent = `${progress.message || 'Testing connection…'} (${elapsed}s)`;
+  el('modal-cancel').textContent = progress.state === 'cancelling' ? 'Stopping…'
+    : progress.phase === 'saving' ? 'Saving…' : 'Stop test';
+  el('modal-cancel').disabled = progress.cancellable === false || progress.state === 'cancelling';
+  let signInUrl;
+  if (progress.signInUrl) {
+    signInUrl = normalizeMicrosoftBrowserUrl(progress.signInUrl);
+    if (!signInUrl) { el('connection-status').textContent = 'The Microsoft sign-in link is invalid. Stop this test and retry.'; return; }
+    el('sql-signin-code-row').hidden = true;
+    el('sql-signin-copy').hidden = true;
+    el('sql-signin-browser-message').hidden = false;
+  } else if (progress.deviceCode) {
+    const verificationUri = normalizeMicrosoftDeviceUri(progress.verificationUri);
+    if (!verificationUri) {
+      el('connection-status').textContent = 'Microsoft sign-in returned an unsupported address. Stop this test and retry.';
+      return;
+    }
+    if (el('sql-signin-code').textContent !== progress.deviceCode) el('sql-signin-copy').textContent = 'Copy code';
+    el('sql-signin-code').textContent = progress.deviceCode;
+    el('sql-signin-code-row').hidden = false;
+    el('sql-signin-copy').hidden = false;
+    el('sql-signin-browser-message').hidden = true;
+    signInUrl = verificationUri;
+  }
+  if (signInUrl) {
+    el('sql-signin-link').href = signInUrl;
+    el('sql-signin').hidden = false;
+    if (connectionBrowser && !connectionBrowser.closed) {
+      connectionBrowser.location.replace(signInUrl);
+      connectionBrowser.focus?.();
+      connectionBrowser = null;
+    }
+  }
+}
+el('sql-signin-copy').addEventListener('click', async () => {
+  const button = el('sql-signin-copy');
+  try {
+    const { copySignInCode } = await copySignInCodeReady;
+    await copySignInCode(el('sql-signin-code').textContent);
+    button.textContent = 'Copied';
+  } catch (error) {
+    el('connection-status').textContent = error.message;
+  }
+});
+function finishSqlSignInTab(){
+  if (connectionBrowser && !connectionBrowser.closed) connectionBrowser.close();
+  connectionBrowser = null;
+  el('sql-signin').hidden = true;
+  el('sql-signin-code').textContent = '';
+  el('sql-signin-link').href = 'https://login.microsoft.com/device';
+}
 
 function openModal(existing){
   editingServerId = existing?.id || null;
+  editedEngineEdition = existing?.engineEdition || null;
   el('modal-title').textContent = existing ? 'Edit SQL Server' : 'Add SQL Server';
   el('modal-save').textContent = existing ? 'Test & Update' : 'Test & Save';
   el('f-name').value = existing?.name || '';
@@ -1312,25 +1397,47 @@ function openModal(existing){
   const groups = [...new Set(servers.map(x=>x.group).filter(Boolean))].sort();
   el('f-group-list').innerHTML = groups.map(g=>`<option value="${esc(g)}"></option>`).join('');
   el('f-server').value = existing?.server || '';
-  el('f-auth').value = existing?.auth || 'windows';
+  el('f-target-type').value = existing?.connectionType || 'auto';
+  el('f-tenant').value = existing?.tenant || '';
+  el('f-auth').value = existing?.auth === 'azuread-interactive' && existing.entraFlow === 'device-code'
+    ? 'azuread-device-code' : existing?.auth || 'windows';
   el('f-user').value = existing?.user || '';
   el('f-pw').value = '';
   el('f-database').value = existing?.database || '';
   el('f-encrypt').value = existing?.encrypt === false ? 'false' : 'true';
   el('f-trustcert').value = existing?.trustCert === false ? 'false' : 'true';
   el('modal-err').style.display = 'none';
+  el('connection-status').textContent = '';
+  el('sql-signin').hidden = true;
+  el('sql-signin-copy').textContent = 'Copy code';
+  el('modal-cancel').textContent = 'Cancel';
+  el('modal-cancel').disabled = false;
   el('f-database-list').innerHTML = '';
   el('f-pw-existing-hint').style.display = (existing && existing.hasPassword) ? 'inline' : 'none';
-  // On edit, if there's already a database saved, keep the field enabled (user can retype)
-  const hasSavedDb = !!(existing && existing.database);
-  el('f-database').disabled = !hasSavedDb;
-  el('f-database').placeholder = hasSavedDb ? 'mydb' : 'Load databases first…';
+  el('f-database').disabled = false;
   updateAuthFields();
   updateDatabaseRequired();
   el('modal-backdrop').classList.add('show');
   setTimeout(()=>el('f-name').focus(), 50);
 }
-function closeModal(){ el('modal-backdrop').classList.remove('show'); editingServerId = null; }
+async function closeModal(){
+  if (connectionStarting) {
+    ++connectionStartSequence;
+    connectionStarting = false;
+    setConnectionBusy(false);
+    finishSqlSignInTab();
+    el('modal-backdrop').classList.remove('show');
+    editingServerId = null;
+    return;
+  }
+  if (connectionClient?.isRunning) {
+    try { await connectionClient.cancel(); }
+    catch (error) { showModalErr(error.message); }
+    return;
+  }
+  el('modal-backdrop').classList.remove('show');
+  editingServerId = null;
+}
 function updateAuthFields(){
   const a = el('f-auth').value;
   const showUser = a!=='windows';
@@ -1338,74 +1445,118 @@ function updateAuthFields(){
   el('f-user-field').style.display = showUser ? 'block' : 'none';
   el('f-pw-field').style.display = showPw ? 'block' : 'none';
   el('f-user-label').textContent = a.startsWith('azuread') ? 'Entra ID user (user@domain.com)' : 'SQL login';
+  el('f-tenant-field').style.display = a.startsWith('azuread') ? 'block' : 'none';
+  el('f-user-hint').textContent = a === 'azuread-interactive'
+    ? 'Normal browser sign-in with your tenant-approved method; no device code needed.'
+    : a === 'azuread-device-code' ? 'A copyable code appears in this window. Use this if browser sign-in is unavailable.'
+    : a === 'azuread-integrated' ? 'Uses a verified Azure CLI session; it does not use Windows SSPI.'
+    : a === 'azuread-password' ? 'Password authentication cannot satisfy MFA.' : 'Account used to connect to SQL.';
 }
 function looksAzureSqlDbHost(server){
-  const s = (server||'').trim().toLowerCase();
-  // Azure SQL DB hostnames are *.database.windows.net; MI hostnames also match
-  // but MI does support master. We can't tell them apart from hostname alone.
-  // Conservative: mark database as required whenever it's *.database.windows.net.
-  return /\.database\.windows\.net(,\d+)?$/i.test(s);
+  return classifySqlEndpoint(server, el('f-target-type').value, currentEngineEdition()).requiresDatabase;
+}
+function currentEngineEdition(){
+  const saved = servers.find(server => server.id === editingServerId);
+  return saved && saved.server === el('f-server').value.trim()
+    && (saved.connectionType || 'auto') === el('f-target-type').value ? editedEngineEdition : undefined;
 }
 function updateDatabaseRequired(){
-  const required = looksAzureSqlDbHost(el('f-server').value);
+  if (!classifySqlEndpoint) return;
+  const target = classifySqlEndpoint(el('f-server').value, el('f-target-type').value, currentEngineEdition());
+  const required = target.requiresDatabase;
   el('f-database-req').style.display = required ? 'inline' : 'none';
   el('f-database-hint').textContent = required
-    ? 'Required for Azure SQL Database. Click ↻ to load databases visible to the account you entered.'
-    : 'Optional. Click ↻ to load databases visible to the account you entered.';
+    ? 'Azure SQL Database: enter the database name. Load is optional.'
+    : target.kind === 'azure-mi' ? 'Managed Instance: optional. Leave blank to use the login default database.'
+    : 'Optional. Enter a database or use Load to discover accessible databases.';
+  el('f-database').placeholder = required ? 'Required database name' : 'Optional - login default database';
+}
+function setConnectionBusy(busy, message = ''){
+  document.querySelectorAll('#modal-backdrop input,#modal-backdrop select').forEach(node => { node.disabled = busy; });
+  el('modal-save').disabled = busy;
+  el('f-database-fetch').disabled = busy;
+  el('connection-status').textContent = message;
+  el('modal-cancel').textContent = busy ? 'Stop test' : 'Cancel';
+  el('modal-cancel').disabled = false;
+  if (!busy && connectionClient?.reconciliationRequired) {
+    el('modal-save').disabled = true;
+    el('f-database-fetch').disabled = true;
+    el('connection-status').textContent = 'Refresh the dashboard and check the server list before retrying; the previous save result is uncertain.';
+  }
 }
 
 async function fetchDatabaseList(){
   const btn = el('f-database-fetch');
   const server = el('f-server').value.trim();
-  const auth = el('f-auth').value;
+  const selection = el('f-auth').value;
+  const auth = selection === 'azuread-device-code' ? 'azuread-interactive' : selection;
+  const entraFlow = selection === 'azuread-device-code' ? 'device-code' : 'browser';
   if (!server) { showModalErr('Enter server address first.'); return; }
   // Validate credentials by auth type
   const user = el('f-user').value.trim();
   const pw = el('f-pw').value;
-  if ((auth==='sqlauth' || auth==='azuread-password') && (!user || !pw)) {
+  const existingPassword = editingServerId && servers.find(server => server.id === editingServerId)?.hasPassword;
+  if ((auth==='sqlauth' || auth==='azuread-password') && (!user || (!pw && !existingPassword))) {
     showModalErr('Enter username and password for this authentication method.'); return;
   }
-  if ((auth==='azuread-interactive' || auth==='azuread-integrated') && !user) {
+  if (auth==='azuread-interactive' && !user) {
     showModalErr('Enter the Entra ID user (user@domain.com) so the correct account is used.'); return;
   }
-  btn.disabled = true; btn.textContent = 'Loading…';
+  if (connectionStarting || connectionClient?.isRunning) return;
+  const startSequence = ++connectionStartSequence;
+  connectionStarting = true;
+  openSqlSignInTab();
+  setConnectionBusy(true, auth==='azuread-interactive' ? 'Checking Entra account and loading databases. Complete browser sign-in if prompted.' : 'Loading accessible databases…');
+  btn.textContent = 'Loading…';
   el('modal-err').style.display = 'none';
+  el('sql-signin').hidden = true;
   try {
     const body = {
-      server, auth, user, password: pw,
+      server, auth, entraFlow, user, password: pw, serverId: editingServerId || undefined,
+      database: el('f-database').value.trim(), connectionType: el('f-target-type').value,
+      tenant: el('f-tenant').value.trim(),
       encrypt: el('f-encrypt').value === 'true',
       trustCert: el('f-trustcert').value === 'true',
     };
-    const r = await fetch('/api/list-databases', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
-    const data = await r.json();
-    if (!r.ok) throw new Error(data.error || 'Failed');
+    await connectionClientReady;
+    if (startSequence !== connectionStartSequence) return;
+    connectionStarting = false;
+    const data = await connectionClient.request('/api/list-databases', { body });
     const dl = el('f-database-list');
     const list = data.databases || [];
     dl.innerHTML = list.map(n=>`<option value="${esc(n)}"></option>`).join('');
     if (list.length === 0) {
-      // On Azure SQL DB, master isn't queryable — user must type. Enable the field anyway.
-      el('f-database').disabled = false;
-      el('f-database').placeholder = 'Type database name';
-      showModalErr(data.warning ? `No databases listed. ${data.warning}` : 'Authenticated OK but no databases visible from master. Type the database name manually.');
+      el('connection-status').textContent = data.warning || 'Connected, but no user databases are visible. You may enter a database manually.';
     } else {
-      el('f-database').disabled = false;
       el('f-database').placeholder = 'Pick or type a database';
       el('f-database-hint').innerHTML = `<b>${list.length}</b> database${list.length>1?'s':''} available. Click the field to see the list.`;
-      el('f-database').focus();
+      el('connection-status').textContent = `Loaded ${list.length} accessible database${list.length>1?'s':''}.`;
     }
   } catch(e){
+    el('connection-status').textContent = '';
     showModalErr('Authentication or fetch failed: ' + e.message);
   }
-  finally { btn.disabled = false; btn.textContent = 'Load'; }
+  finally {
+    if (startSequence === connectionStartSequence) {
+      connectionStarting = false;
+      setConnectionBusy(false, el('connection-status').textContent);
+      btn.textContent = 'Load';
+      finishSqlSignInTab();
+    }
+  }
 }
 
 async function saveServer(){
   const isEdit = !!editingServerId;
+  const editedId = editingServerId;
   const body = {
     name: el('f-name').value.trim(),
     group: el('f-group').value.trim() || null,
     server: el('f-server').value.trim(),
-    auth: el('f-auth').value,
+    connectionType: el('f-target-type').value,
+    tenant: el('f-tenant').value.trim(),
+    auth: el('f-auth').value === 'azuread-device-code' ? 'azuread-interactive' : el('f-auth').value,
+    entraFlow: el('f-auth').value === 'azuread-device-code' ? 'device-code' : 'browser',
     user: el('f-user').value.trim(),
     password: el('f-pw').value,
     database: el('f-database').value.trim(),
@@ -1416,28 +1567,86 @@ async function saveServer(){
   if(looksAzureSqlDbHost(body.server) && !body.database){
     showModalErr('Azure SQL Database requires a specific database name.'); return;
   }
+  if(body.auth === 'azuread-interactive' && !body.user){
+    showModalErr('Enter the Entra ID user so the intended account can be verified.'); return;
+  }
+  if (connectionStarting || connectionClient?.isRunning) return;
+  const startSequence = ++connectionStartSequence;
+  connectionStarting = true;
+  openSqlSignInTab();
   const saveBtn = el('modal-save');
-  saveBtn.disabled = true; saveBtn.textContent = 'Testing connection…';
+  setConnectionBusy(true, body.auth === 'azuread-interactive'
+    ? 'Verifying Entra account and testing SQL. Complete browser sign-in if prompted.' : 'Testing SQL connection…');
+  el('modal-err').style.display = 'none';
+  el('sql-signin').hidden = true;
+  saveBtn.textContent = 'Testing connection…';
   try {
-    const url = isEdit ? '/api/servers/' + encodeURIComponent(editingServerId) : '/api/servers';
+    const url = isEdit ? '/api/servers/' + encodeURIComponent(editedId) : '/api/servers';
     const method = isEdit ? 'PATCH' : 'POST';
-    const r = await fetch(url, {method, headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
-    const data = await r.json();
-    if(!r.ok) throw new Error(data.error||'Failed');
+    await connectionClientReady;
+    if (startSequence !== connectionStartSequence) return;
+    connectionStarting = false;
+    const data = await connectionClient.request(url, { method, body });
+    invalidateClientMetrics(data.id || editedId);
     await loadServers();
-    setActiveServer(data.id || editingServerId);
-    closeModal();
+    setActiveServer(data.id || editedId);
+    el('modal-backdrop').classList.remove('show');
+    editingServerId = null;
   } catch(e){ showModalErr(e.message); }
-  finally { saveBtn.disabled = false; saveBtn.textContent = isEdit ? 'Test & Update' : 'Test & Save'; }
+  finally {
+    if (startSequence === connectionStartSequence) {
+      connectionStarting = false;
+      setConnectionBusy(false);
+      saveBtn.textContent = isEdit ? 'Test & Update' : 'Test & Save';
+      finishSqlSignInTab();
+    }
+  }
 }
-function showModalErr(msg){ el('modal-err').textContent = msg; el('modal-err').style.display='block'; }
+function showModalErr(msg){
+  const banner = el('modal-err'), message = String(msg);
+  banner.replaceChildren();
+  if (message.length <= 260) banner.textContent = message;
+  else {
+    const summary = document.createElement('div');
+    summary.textContent = message.slice(0, 160) + '…';
+    const details = document.createElement('details'), label = document.createElement('summary'), full = document.createElement('pre');
+    label.textContent = 'Show full diagnostic';
+    full.textContent = message;
+    details.append(label, full);
+    banner.append(summary, details);
+  }
+  banner.style.display = 'block';
+}
+function showRegistryError(action, error){
+  setStatus('err', 'Configuration error');
+  el('err').textContent = `${action}: ${error.message || error}`;
+  el('err').classList.add('show');
+}
+async function registryRequest(url, options){
+  const response = await fetch(url, options);
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || ('HTTP ' + response.status));
+  return data;
+}
 
 async function loadServers(){
   try {
-    const r = await fetch('/api/servers');
-    servers = await r.json();
+    const list = await registryRequest('/api/servers');
+    if (!Array.isArray(list)) throw new Error('Invalid server registry response');
+    for (const previous of servers) {
+      const current = list.find(s => s.id === previous.id);
+      const withoutPause = value => { const { monitoringPaused, ...rest } = value; return rest; };
+      if (!current || JSON.stringify(withoutPause(current)) !== JSON.stringify(withoutPause(previous))) invalidateClientMetrics(previous.id);
+    }
+    servers = list;
+    fleetUI?.setServers(servers.map(server => {
+      const cached = fleetUI.getServer(server.id);
+      return cached?.server === server.server ? { ...cached, ...server } : { ...server, status:'loading', metrics:{}, sampledAt:null };
+    }));
     renderServerList();
-  } catch(e){ console.error(e); }
+    updatePauseControls();
+    return list;
+  } catch(e){ showRegistryError('Load servers failed', e); throw e; }
 }
 
 function renderServerList(){
@@ -1457,21 +1666,32 @@ function renderServerList(){
     const initials = s.name.split(/[\s-_]/).filter(Boolean).slice(0,2).map(w=>w[0]).join('').toUpperCase() || 'S';
     const authLabel = ({windows:'WinAuth', sqlauth:'SQL', 'azuread-integrated':'Entra', 'azuread-password':'Entra-PW', 'azuread-interactive':'Entra-MFA'})[s.auth] || s.auth;
     const st = serverState.get(s.id);
+    const overview = fleetUI?.getServer(s.id);
     let statusCls = '';
     let freshness = '';
     if (st) {
           if (st.lastError) statusCls = 'err';
           else if (st.data) {
             const health = computeHealth(st.data);
-            statusCls = health.level === 'critical' ? 'err' : health.level === 'warning' ? 'warn' : 'ok';
+            statusCls = health.level === 'critical' ? 'err' : health.level === 'warning' ? 'warn' : health.level === 'healthy' ? 'ok' : '';
           }
           if (st.lastFetchAt) freshness = formatAgo(now - st.lastFetchAt);
     }
-    return `<div class="server-item ${s.id===activeServerId?'active':''}" data-id="${esc(s.id)}">
+    if (dashboardView === 'overview' && overview) {
+      const level = fleetHelpers.fleetHealthLevel(overview);
+      statusCls = level === 'critical' ? 'err' : level === 'warning' ? 'warn' : level === 'healthy' ? 'ok' : '';
+      if (overview.status === 'error') statusCls = 'err';
+      freshness = fleetHelpers.sampleAge(overview.sampledAt, now);
+    }
+    const badgeData = dashboardView === 'overview' ? overview || st?.data : st?.data || overview;
+    const badge = (fleetHelpers?.serviceBadge(s, badgeData || {}) || '') + (fleetHelpers?.pausedBadge(s) || '');
+    if (s.monitoringPaused) statusCls = '';
+    return `<div class="server-item ${dashboardView==='detail' && s.id===activeServerId?'active':''}" data-id="${esc(s.id)}" tabindex="0" role="button" aria-label="Open ${esc(s.name)} detailed dashboard">
           <div class="icon">${esc(initials)}<div class="status-dot ${statusCls}"></div></div>
           <div class="body">
             <div class="name">${esc(s.name)}</div>
-            <div class="meta">${esc(s.server)} · ${authLabel}${freshness ? ' · <span class="freshness">'+freshness+'</span>' : ''}</div>
+            <div class="meta">${esc(s.server)} · ${esc(authLabel || '')}${freshness ? ' · <span class="freshness">'+esc(freshness)+'</span>' : ''}</div>
+            ${badge}
           </div>
           <button class="edit" data-edit="${esc(s.id)}" title="Edit">✎</button>
       <button class="del" data-del="${esc(s.id)}" title="Remove">×</button>
@@ -1490,6 +1710,12 @@ function renderServerList(){
   }
   el('server-list').innerHTML = html || '<div class="empty" style="font-size:12px;">No servers. Click + Add.</div>';
   el('server-list').querySelectorAll('.server-item').forEach(item=>{
+    item.addEventListener('keydown', event => {
+      if (event.target === item && (event.key === 'Enter' || event.key === ' ')) {
+        event.preventDefault();
+        setActiveServer(item.dataset.id);
+      }
+    });
     item.draggable = true;
     item.addEventListener('dragstart', (e) => {
       e.dataTransfer.setData('text/plain', item.dataset.id);
@@ -1507,11 +1733,13 @@ function renderServerList(){
       const fromIdx = servers.findIndex(s => s.id === draggedId);
       const toIdx = servers.findIndex(s => s.id === targetId);
       if (fromIdx < 0 || toIdx < 0) return;
-      const [moved] = servers.splice(fromIdx, 1);
-      servers.splice(toIdx, 0, moved);
-      renderServerList();
-      // Persist order server-side
-      await fetch('/api/servers/reorder', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ order: servers.map(s=>s.id) })});
+      const reordered = [...servers];
+      const [moved] = reordered.splice(fromIdx, 1);
+      reordered.splice(toIdx, 0, moved);
+      try {
+        await registryRequest('/api/servers/reorder', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ order: reordered.map(s=>s.id) })});
+        await loadServers();
+      } catch(error) { showRegistryError('Reorder servers failed', error); }
     });
     item.addEventListener('click', (e)=>{
           if(e.target.dataset.del || e.target.dataset.edit) return;
@@ -1532,15 +1760,18 @@ function renderServerList(){
           const id = btn.dataset.del;
           const s = servers.find(x=>x.id===id);
           if(!(await confirmDialog(`Remove server "${s?.name||id}"?`, `This will delete the entry from servers.json. The server itself is not affected.`))) return;
-          await fetch('/api/servers/'+encodeURIComponent(id), {method:'DELETE'});
-          const wasActive = id===activeServerId;
-          await loadServers();
-          serverState.delete(id);
-          if(wasActive){
-            activeServerId = servers[0]?.id || null;
-            if(activeServerId) setActiveServer(activeServerId);
-            else { renderEmpty(); }
-          }
+          try {
+            await registryRequest('/api/servers/'+encodeURIComponent(id), {method:'DELETE'});
+            invalidateClientMetrics(id);
+            servers = servers.filter(s => s.id !== id);
+            if(id === activeServerId){
+              activeServerId = servers[0]?.id || null;
+              if(dashboardView === 'detail' && activeServerId) setActiveServer(activeServerId);
+              else if(dashboardView === 'detail') setDashboardView('overview');
+            }
+            renderServerList();
+            await loadServers();
+          } catch(error) { showRegistryError('Remove server failed', error); }
     });
   });
 }
@@ -1555,25 +1786,131 @@ function formatAgo(ms){
 }
 // Refresh freshness labels every second without re-rendering the whole list
 setInterval(() => {
+  if (document.hidden) return;
   const now = Date.now();
+  if (dashboardView === 'overview') fleetUI?.tick();
   document.querySelectorAll('.server-item').forEach(item => {
     const id = item.dataset.id;
     const st = serverState.get(id);
     const span = item.querySelector('.freshness');
-    if (span && st?.lastFetchAt) span.textContent = formatAgo(now - st.lastFetchAt);
+    const overview = dashboardView === 'overview' ? fleetUI?.getServer(id) : null;
+    if (span && overview) span.textContent = fleetHelpers.sampleAge(overview.sampledAt, now);
+    else if (span && st?.lastFetchAt) span.textContent = formatAgo(now - st.lastFetchAt);
   });
 }, 1000);
 
 function renderEmpty(){
-  el('current-server-title').textContent = 'No server selected';
-  el('current-server-sub').textContent = 'Add a server to start monitoring.';
+  if (dashboardView !== 'detail') return;
+  const current = servers.find(server => server.id === activeServerId);
+  el('current-server-title').innerHTML = esc(current?.name || 'No server selected') + (current ? ' '+fleetHelpers.serviceBadge(current)+' '+fleetHelpers.pausedBadge(current) : '');
+  el('current-server-sub').textContent = current ? `${current.server} · ${current.monitoringPaused ? 'monitoring paused · no collected sample available' : 'waiting for a collected sample'}` : 'Add a server to start monitoring.';
+  el('err').classList.remove('show');
+  el('health-label').textContent = 'Unavailable';
+  el('semaphore').classList.remove('healthy','warning','critical');
+  el('health-popover').textContent = 'No collected sample available.';
   el('narrative').textContent = 'Select or add a server.';
   el('kpis').innerHTML = '';
-  ['waits','buffer-donut','top-queries','file-io','databases','missing-idx','tempdb','active'].forEach(id=>el(id).innerHTML='');
+  ['timeline','waits','latches','buffer-donut','top-queries','file-io','databases','missing-idx','tempdb','active','waiters','blocking-tree'].forEach(id=>el(id).innerHTML='');
+  el('blocking-card').style.display = 'none';
+  el('waiters-card').style.display = 'none';
+  updateDetailActions();
 }
 
+function cancelDetailRequests(){
+  detailGeneration++;
+  for (const request of metricsInFlight.values()) request.controller?.abort();
+  metricsInFlight.clear();
+  for (const state of serverState.values()) {
+    state.historyRequest?.abort();
+    state.historyRequest = null;
+  }
+}
+function refreshCurrentView(){
+  if (!dashboardStarted || document.hidden) return;
+  if (dashboardView === 'overview') return fleetUI?.start(!paused);
+  return fetchMetrics(true);
+}
+function renderFleetHealth(summary){
+  if (dashboardView !== 'overview') return;
+  const level = summary.critical ? 'critical' : summary.warning ? 'warning' : summary.unavailable || !summary.total ? '' : 'healthy';
+  el('semaphore').classList.remove('healthy','warning','critical');
+  if (level) el('semaphore').classList.add(level);
+  el('health-label').textContent = level === 'critical' ? 'Critical' : level === 'warning' ? 'Warning' : level === 'healthy' ? 'Healthy' : 'Unavailable';
+  el('health-popover').innerHTML = `<h4>Fleet health · ${summary.total} servers</h4><div>${summary.healthy} healthy · ${summary.warning} warning · ${summary.critical} critical · ${summary.unavailable} unavailable</div><div class="none">Health reflects collected samples only, not an availability guarantee.</div>`;
+}
+function setDashboardView(view){
+  dashboardView = view === 'detail' ? 'detail' : 'overview';
+  el('dashboard-topbar').classList.toggle('overview-topbar', dashboardView === 'overview');
+  el('overview-view').hidden = dashboardView !== 'overview';
+  el('detail-view').hidden = dashboardView !== 'detail';
+  el('fleet-back-btn').hidden = dashboardView !== 'detail';
+  el('fleet-btn').classList.toggle('active', dashboardView === 'overview');
+  if (dashboardView === 'overview') el('fleet-btn').setAttribute('aria-current','page');
+  else el('fleet-btn').removeAttribute('aria-current');
+  el('semaphore').classList.remove('open');
+  countdown = refreshSeconds;
+  if (dashboardView === 'overview') {
+    cancelDetailRequests();
+    el('current-server-title').textContent = 'All servers';
+    el('current-server-sub').textContent = `${servers.length} configured servers · lightweight samples`;
+    renderFleetHealth(fleetHelpers.summarizeFleet(servers.map(server => fleetUI.getServer(server.id) || server)));
+    if (paused) setStatus('paused', 'View paused · background monitoring unchanged');
+    if (!document.hidden && !paused && dashboardStarted) fleetUI.start(true);
+  } else fleetUI?.stop();
+  updateDetailActions();
+  updatePauseControls();
+  renderServerList();
+  updateAlertBadge();
+}
+function updateDetailActions(DATA){
+  const currentData = arguments.length ? DATA : serverState.get(activeServerId)?.data;
+  const usable = dashboardView === 'detail' && !!currentData && !serverState.get(activeServerId)?.lastError;
+  el('counters-btn').disabled = !countersController || dashboardView !== 'detail' || !activeServerId;
+  el('counters-btn').hidden = dashboardView !== 'detail';
+  el('snapshot-btn').hidden = dashboardView !== 'detail';
+  el('snapshot-btn').disabled = !usable;
+  el('alerts-btn').disabled = dashboardView !== 'detail' && !alertSettingsController;
+  document.querySelectorAll('#detail-view [data-ai-scope]').forEach(button => {
+    const scope = button.dataset.aiScope;
+    let available = !!aiController && usable && button.dataset.aiUnavailable !== 'true';
+    if (available && scope === 'timeline') available = (serverState.get(activeServerId)?.history?.length || 0) >= 2;
+    else if (available && scope === 'custom_counters') {
+      const counter = currentData.custom_counters?.find(item => item.id === (button.dataset.aiCounterId || button.dataset.aiMetric));
+      available = !!counter && counter.enabled !== false && !counter.stale && !counter.error
+        && typeof counter.value === 'number' && Number.isFinite(counter.value);
+    } else if (available && scope === 'instance') available = Object.values(currentData.instance || {}).some(value => typeof value === 'number' && Number.isFinite(value));
+    else if (available) available = currentData[scope] != null && currentData.sectionMetadata?.[scope]?.applicable !== false;
+    button.disabled = !available;
+    button.title = available ? 'Review SQL context and ask an AI provider about this visual' : 'A collected sample for this visual is required';
+  });
+}
+function renderSectionFreshness(DATA){
+  document.querySelectorAll('#detail-view .card[data-ai-panel]').forEach(card => {
+    const metadata = DATA.sectionMetadata?.[card.dataset.aiPanel];
+    let note = card.querySelector('.section-sample-note');
+    if (!note && metadata) {
+      note = document.createElement('div');
+      note.className = 'section-sample-note';
+      card.querySelector('.card-sub')?.after(note);
+    }
+    if (!note) return;
+    note.hidden = !metadata;
+    if (!metadata) return;
+    note.classList.toggle('stale', !!metadata.stale);
+    note.textContent = metadata.applicable === false ? 'Not available for this SQL service.' :
+      `${metadata.stale ? 'Stale sample · ' : ''}${metadata.sampledAt ? 'Sampled '+fmtDate(metadata.sampledAt) : 'No sample available'}${metadata.intervalSeconds ? ' · collected every '+metadata.intervalSeconds+'s' : ''}${metadata.lookbackHours ? ' · '+metadata.lookbackHours+'h query lookback' : ''}${metadata.error ? ' · '+metadata.error : ''}`;
+  });
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { fleetUI?.stop(); cancelDetailRequests(); return; }
+  if (dashboardStarted && !currentViewPaused()) refreshCurrentView();
+});
+window.addEventListener('pagehide', () => { fleetUI?.stop(); cancelDetailRequests(); });
+
 function setActiveServer(id){
+  if (!servers.some(s => s.id === id)) return;
   activeServerId = id;
+  setDashboardView('detail');
   countdown = refreshSeconds;
   renderServerList();
   const st = stateFor(id);
@@ -1585,22 +1922,25 @@ function setActiveServer(id){
     } catch {}
   }
   // Fetch history for sparklines (async, will re-render when it arrives)
-  if (!st.historyLoaded) {
-    fetch('/api/history?serverId='+encodeURIComponent(id)+'&limit=120').then(r=>r.json()).then(h=>{
+  if (!st.historyLoaded && !st.historyRequest && !document.hidden) {
+    const controller = new AbortController();
+    st.historyRequest = controller;
+    fetch('/api/history?serverId='+encodeURIComponent(id)+'&limit=120', { signal:controller.signal }).then(r=>r.json()).then(h=>{
+      if (controller.signal.aborted || serverState.get(id) !== st) return;
       st.history = Array.isArray(h) ? h : [];
       st.historyLoaded = true;
-      if (activeServerId === id && st.data) render(st.data, st.prevData);
-    }).catch(()=>{});
+      if (dashboardView === 'detail' && activeServerId === id && st.data) render(st.data, st.prevData);
+    }).catch(()=>{}).finally(()=>{ if (st.historyRequest === controller) st.historyRequest = null; });
   }
   if (st.data) {
     render(st.data, st.prevData);
     const ageS = Math.round((Date.now() - st.lastFetchAt)/1000);
-    setStatus('stale', `Cached (${ageS}s old) · refreshing…`);
+    setStatus(currentViewPaused() ? 'paused' : 'stale', currentViewPaused() ? 'Paused · last collected sample retained' : `Cached (${ageS}s old) · refreshing…`);
   } else {
     renderEmpty();
     setStatus('ok','Loading…');
   }
-  fetchMetrics();
+  fetchMetrics(true);
 }
 
 function setStatus(state, text){
@@ -1622,28 +1962,40 @@ function delta(cur, prev, invert=false){
   return {cls: bad?'up':'down', txt: `${arrow} ${Math.abs(d).toLocaleString(undefined,{maximumFractionDigits:1})}`};
 }
 
-async function fetchMetrics(){
-  if(fetching || !activeServerId) return;
-  fetching = true;
+function fetchMetrics(){
+  if(dashboardView !== 'detail' || document.hidden || !activeServerId || !servers.some(s => s.id === activeServerId)) return;
+  if (pauseUpdates.has(activeServerId) || (currentViewPaused() && arguments[0] !== true)) return;
   const requestedId = activeServerId;
+  if (metricsInFlight.has(requestedId)) return metricsInFlight.get(requestedId).promise;
+  const st = stateFor(requestedId);
+  const request = { controller:new AbortController(), generation:detailGeneration,
+    pauseRevision: pauseRevisions.get(requestedId) || 0 };
+  metricsInFlight.set(requestedId, request);
   setStatus('ok','Refreshing…');
+  request.promise = (async () => {
   try {
-    const r = await fetch('/api/metrics?serverId='+encodeURIComponent(requestedId), {cache:'no-store'});
+    const r = await fetch('/api/metrics?serverId='+encodeURIComponent(requestedId), {cache:'no-store', signal:request.controller.signal});
     const data = await r.json();
-    if(!r.ok) throw new Error(data.error||('HTTP '+r.status));
+    if (request.generation !== detailGeneration || serverState.get(requestedId) !== st || !servers.some(s => s.id === requestedId)) return;
+    if (data.monitoringPaused !== undefined && request.pauseRevision === (pauseRevisions.get(requestedId) || 0) && !pauseUpdates.has(requestedId)) {
+      applyServerPause(requestedId, data.monitoringPaused);
+    }
+    if(!r.ok) {
+      if (data.monitoringPaused || servers.find(server => server.id === requestedId)?.monitoringPaused) return;
+      throw new Error(data.error||('HTTP '+r.status));
+    }
     // Store per-server cache regardless of whether user has switched again
-    const st = stateFor(requestedId);
     st.prevData = st.data;
     st.data = data;
-    st.lastFetchAt = Date.now();
+    st.lastFetchAt = Number.isFinite(Date.parse(data.generated_at)) ? Date.parse(data.generated_at) : Date.now();
     st.lastError = null;
     // Extend local history buffer (mirrors what the server appended to disk)
     st.history = st.history || [];
     const bhr = data.instance?.buffer_cache_hit_ratio_base > 0 ? (data.instance.buffer_cache_hit_ratio*100/data.instance.buffer_cache_hit_ratio_base) : 100;
     const customVals = {};
     (data.custom_counters||[]).forEach(cc=>{ if(typeof cc.value==='number') customVals[cc.id] = cc.value; });
-    st.history.push({
-      t: Date.now(),
+    if (!st.history.some(sample => sample.t === st.lastFetchAt)) st.history.push({
+      t: st.lastFetchAt,
       ple: data.instance?.page_life_expectancy ?? null,
       bhr: Number(bhr.toFixed(2)),
       memMb: data.instance?.memory_in_use_mb ?? null,
@@ -1660,196 +2012,41 @@ async function fetchMetrics(){
     try {
       const curHealth = computeHealth(data);
       const prevHealth = st.prevData ? computeHealth(st.prevData) : null;
-      recordAlertTransitions(requestedId, curHealth, prevHealth);
+      if (!servers.find(server => server.id === requestedId)?.monitoringPaused) recordAlertTransitions(requestedId, curHealth, prevHealth);
     } catch {}
     // Only render if the user is still looking at this server
-    if (requestedId === activeServerId) {
+    if (dashboardView === 'detail' && requestedId === activeServerId) {
       render(st.data, st.prevData);
       el('err').classList.remove('show');
-      if(!paused) setStatus('ok', `Updated ${new Date().toLocaleTimeString()}`);
+      if(!currentViewPaused()) setStatus('ok', `Updated ${new Date(st.lastFetchAt).toLocaleTimeString()}`);
+      else setStatus('paused', 'Paused · last collected sample retained');
     }
     renderServerList();
     updateAlertBadge();
   } catch(e){
-    const st = stateFor(requestedId); st.lastError = e.message;
-    if (requestedId === activeServerId) {
+    if (e.name === 'AbortError' || request.generation !== detailGeneration) return;
+    if (serverState.get(requestedId) !== st || !servers.some(s => s.id === requestedId)) return;
+    st.lastError = e.message;
+    if (dashboardView === 'detail' && requestedId === activeServerId) {
       setStatus('err','Error');
       el('err').textContent = `Fetch failed: ${e.message}`;
       el('err').classList.add('show');
+      updateDetailActions(null);
     }
     renderServerList();
-  } finally { fetching = false; }
+  } finally {
+    if (metricsInFlight.get(requestedId) === request) metricsInFlight.delete(requestedId);
+  }
+  })();
+  return request.promise;
 }
 
 function computeHealth(DATA){
-  const i = DATA.instance || {};
-  const isAzureDb = DATA.engine === 'azure-sqldb';
-  const critical = [], warning = [];
-
-  // === UNIVERSAL ===
-  // Blocking is always critical (RPO/RTO impact, users waiting)
-  if ((i.blocked_requests||0) > 0) critical.push(`${i.blocked_requests} blocked session(s)`);
-
-  // Wait-based scoring: what percentage of waits are the "dangerous" ones?
-  // Follows Paul Randal / Microsoft Learn methodology
-  const waits = DATA.waits || [];
-  const totalWaitS = waits.reduce((s,w)=>s + (Number(w.wait_time_s)||0), 0);
-  const totalSignalS = waits.reduce((s,w)=>s + (Number(w.signal_wait_s)||0), 0);
-
-  if (totalWaitS > 0) {
-    // Signal-wait percentage — proxy for CPU pressure (MS Learn threshold: >25% = pressure)
-    const signalPct = (totalSignalS / totalWaitS) * 100;
-    if (signalPct >= 25) critical.push(`Signal wait ${signalPct.toFixed(1)}% (CPU pressure ≥25%)`);
-    else if (signalPct >= 20) warning.push(`Signal wait ${signalPct.toFixed(1)}% (approaching CPU pressure)`);
-
-    // Categorize top waits and check their dominance vs total
-    const catSum = (patterns) => waits
-      .filter(w => patterns.some(p => String(w.wait_type||'').includes(p)))
-      .reduce((s,w)=>s + (Number(w.wait_time_s)||0), 0);
-
-    const ioPct   = catSum(['PAGEIOLATCH_SH','PAGEIOLATCH_EX','PAGEIOLATCH_UP','IO_COMPLETION']) / totalWaitS * 100;
-    const logPct  = catSum(['WRITELOG','LOGBUFFER']) / totalWaitS * 100;
-    const memPct  = catSum(['RESOURCE_SEMAPHORE','CMEMTHREAD','SOS_RESERVEDMEMBLOCKLIST']) / totalWaitS * 100;
-    const parPct  = catSum(['CXPACKET','CXCONSUMER']) / totalWaitS * 100;
-    const lockPct = catSum(['LCK_M_']) / totalWaitS * 100;
-    const netPct  = catSum(['ASYNC_NETWORK_IO']) / totalWaitS * 100;
-
-    if (ioPct   >= 30) critical.push(`Disk I/O waits ${ioPct.toFixed(0)}% (storage bottleneck)`);
-    else if (ioPct   >= 15) warning.push(`Disk I/O waits ${ioPct.toFixed(0)}%`);
-    if (logPct  >= 20) critical.push(`WRITELOG waits ${logPct.toFixed(0)}% (log disk bottleneck)`);
-    else if (logPct  >= 10) warning.push(`WRITELOG waits ${logPct.toFixed(0)}%`);
-    if (memPct  >= 15) critical.push(`Memory-grant waits ${memPct.toFixed(0)}% (memory pressure)`);
-    else if (memPct  >= 5)  warning.push(`Memory-grant waits ${memPct.toFixed(0)}%`);
-    if (parPct  >= 30) warning.push(`Parallelism waits ${parPct.toFixed(0)}% (review MAXDOP / cost threshold)`);
-    if (lockPct >= 20) critical.push(`Lock waits ${lockPct.toFixed(0)}% (blocking hotspot)`);
-    else if (lockPct >= 10) warning.push(`Lock waits ${lockPct.toFixed(0)}%`);
-    if (netPct  >= 20) warning.push(`ASYNC_NETWORK_IO ${netPct.toFixed(0)}% (slow client/network)`);
-  }
-
-  // === MEMORY ===
-  if (isAzureDb) {
-    const mem = i.avg_memory_percent||0;
-    if (mem >= 95) critical.push(`DTU memory ${mem.toFixed(0)}% (near limit)`);
-    else if (mem >= 85) warning.push(`DTU memory ${mem.toFixed(0)}%`);
-  } else {
-    const ple = i.page_life_expectancy;
-    const targetMb = i.target_memory_mb || 0;
-    // Kehayias formula: 300s per 4GB of buffer pool.
-    // But never below 300s (small servers) and never above 600s floor (dev/lab realism).
-    const pleFloor = Math.min(600, Math.max(300, Math.floor(targetMb / 4096) * 300));
-    if (ple != null) {
-      // Only mark critical if PLE is genuinely low (< 60s) AND the server has been up long enough
-      // for PLE to have stabilized (fresh restarts show low PLE for the first ~10 minutes).
-      const uptimeMin = i.uptime_min || 0;
-      if (uptimeMin >= 15 && ple < 60) critical.push(`Page Life Expectancy ${ple}s (severe memory pressure)`);
-      else if (ple < pleFloor) warning.push(`Page Life Expectancy ${ple}s (target ≥${pleFloor}s)`);
-    }
-    const bhr = i.buffer_cache_hit_ratio_base > 0 ? (i.buffer_cache_hit_ratio*100/i.buffer_cache_hit_ratio_base) : 100;
-    if (bhr < 90) critical.push(`Buffer cache hit ratio ${bhr.toFixed(1)}% (poor)`);
-    else if (bhr < 97) warning.push(`Buffer cache hit ratio ${bhr.toFixed(1)}% (below target ≥97%)`);
-  }
-
-  // === CPU / IO for Azure SQL DB (resource-relative) ===
-  if (isAzureDb) {
-    const cpu = i.avg_cpu_percent||0;
-    const dio = i.avg_data_io_percent||0;
-    const lio = i.avg_log_write_percent||0;
-    if (cpu >= 90) critical.push(`DTU CPU ${cpu.toFixed(0)}% (throttling likely)`);
-    else if (cpu >= 75) warning.push(`DTU CPU ${cpu.toFixed(0)}% (sustained high)`);
-    if (dio >= 90) critical.push(`Data I/O ${dio.toFixed(0)}% (throttling)`);
-    else if (dio >= 75) warning.push(`Data I/O ${dio.toFixed(0)}%`);
-    if (lio >= 90) critical.push(`Log Write ${lio.toFixed(0)}% (throttling)`);
-    else if (lio >= 75) warning.push(`Log Write ${lio.toFixed(0)}%`);
-  }
-
-  // === FILE I/O LATENCY ===
-  // Thresholds are engine-aware:
-  //   on-prem: Paul Randal — data >10ms warn, >20ms critical; log >5ms critical
-  //   Azure SQL DB / MI: remote storage has higher baseline; data >30ms warn,
-  //     >100ms critical; log >20ms warn, >50ms critical
-  const isAzureAny = isAzureDb || DATA.engine === 'azure-mi';
-  const dataWarn = isAzureAny ? 30 : 10;
-  const dataCrit = isAzureAny ? 100 : 20;
-  const logWarn  = isAzureAny ? 20 : 5;
-  const logCrit  = isAzureAny ? 50 : 20;
-
-  const io = DATA.file_io || [];
-  const dataFiles = io.filter(f => f.file_type === 'ROWS');
-  const logFiles  = io.filter(f => f.file_type === 'LOG');
-  const badData = dataFiles.filter(f => (f.avg_read_latency_ms||0) > dataCrit || (f.avg_write_latency_ms||0) > dataCrit);
-  const midData = dataFiles.filter(f => !badData.includes(f) && ((f.avg_read_latency_ms||0) > dataWarn || (f.avg_write_latency_ms||0) > dataWarn));
-  const badLog  = logFiles.filter(f => (f.avg_write_latency_ms||0) > logCrit);
-  const midLog  = logFiles.filter(f => !badLog.includes(f) && (f.avg_write_latency_ms||0) > logWarn);
-  if (badData.length >= 2) critical.push(`${badData.length} data files with I/O >${dataCrit}ms`);
-  else if (badData.length === 1) warning.push(`1 data file with I/O >${dataCrit}ms`);
-  else if (midData.length >= 3) warning.push(`${midData.length} data files with I/O ${dataWarn}-${dataCrit}ms`);
-  if (badLog.length > 0) critical.push(`${badLog.length} log file(s) with write >${logCrit}ms`);
-  else if (midLog.length > 0) warning.push(`${midLog.length} log file(s) with write >${logWarn}ms`);
-
-  // === MISSING INDEXES ===
-  // Improvement score = avg_user_impact * avg_total_user_cost * user_seeks+user_scans
-  // >100,000 = clearly high impact; >500,000 = severe missed opportunity
-  const mi = DATA.missing_indexes || [];
-  const severe = mi.filter(m => (m.improvement_score||0) > 500000);
-  const high   = mi.filter(m => (m.improvement_score||0) > 100000 && (m.improvement_score||0) <= 500000);
-  if (severe.length > 0) critical.push(`${severe.length} severe missing index(es) — top score ${(severe[0].improvement_score/1000).toFixed(0)}k`);
-  else if (high.length > 0) warning.push(`${high.length} high-impact missing index(es)`);
-
-  // === BACKUPS (on-prem only — Azure SQL DB has automatic backups) ===
-  // On lab/dev instances (short uptime, sample DBs), missing backups are normal.
-  // Only flag as critical if the instance has been up long enough that a backup
-  // policy would realistically have run.
-  if (!isAzureDb) {
-    const dbs = DATA.databases || [];
-    const userDbs = dbs.filter(d => !['tempdb','model','master','msdb'].includes(d.name));
-    const never = userDbs.filter(d => !d.last_full_backup);
-    const stale7 = userDbs.filter(d => d.last_full_backup && (Date.now()-new Date(d.last_full_backup).getTime()) > 7*86400000);
-    const stale1 = userDbs.filter(d => d.last_full_backup && (Date.now()-new Date(d.last_full_backup).getTime()) > 86400000 && !stale7.includes(d));
-    // Instance uptime in hours — treat servers up < 48h as recently-restarted / lab
-    const uptimeH = (i.uptime_min||0)/60;
-    // Server has been up long enough that a backup should have happened
-    const backupsExpected = uptimeH >= 48;
-    if (never.length > 0) {
-      if (backupsExpected) critical.push(`${never.length} DB(s) never backed up (server up ${uptimeH.toFixed(0)}h)`);
-      else warning.push(`${never.length} DB(s) never backed up (lab/recent-restart — normal)`);
-    }
-    if (stale7.length > 0) warning.push(`${stale7.length} DB(s) not backed up in >7 days`);
-    else if (stale1.length >= 3) warning.push(`${stale1.length} DB(s) last full backup >24h ago`);
-  }
-
-  // === TEMPDB (on-prem only) ===
-  const t = DATA.tempdb;
-  if (t && !isAzureDb) {
-    const tot = (t.user_obj_mb||0)+(t.internal_obj_mb||0)+(t.version_store_mb||0)+(t.free_mb||0);
-    if (tot > 0) {
-      const freePct = (t.free_mb||0)/tot*100;
-      if (freePct < 5) critical.push(`TempDB free space ${freePct.toFixed(0)}%`);
-      else if (freePct < 15) warning.push(`TempDB free space ${freePct.toFixed(0)}%`);
-    }
-  }
-
-  // === CUSTOM COUNTERS ===
-  const ccs = DATA.custom_counters || [];
-  for (const cc of ccs) {
-    if (cc.error) { warning.push(`Counter "${cc.name}" failed: ${cc.error}`); continue; }
-    if (typeof cc.value !== 'number') continue;
-    const v = cc.value;
-    const u = cc.unit || '';
-    const label = `${cc.name} ${v}${u}`;
-    if (cc.critGt != null && v >= cc.critGt) critical.push(`${label} ≥ ${cc.critGt}${u}`);
-    else if (cc.warnGt != null && v >= cc.warnGt) warning.push(`${label} ≥ ${cc.warnGt}${u}`);
-    if (cc.critLt != null && v <= cc.critLt) critical.push(`${label} ≤ ${cc.critLt}${u}`);
-    else if (cc.warnLt != null && v <= cc.warnLt) warning.push(`${label} ≤ ${cc.warnLt}${u}`);
-  }
-
-  let level = 'healthy', label = 'Healthy';
-  if (critical.length > 0) { level = 'critical'; label = 'Critical'; }
-  else if (warning.length > 0) { level = 'warning'; label = 'Warning'; }
-  return { level, label, critical, warning };
+  return sharedComputeHealth(DATA);
 }
 
 function counterCls(cc) {
-  if (typeof cc.value !== 'number') return '';
+  if (cc.enabled === false || cc.stale || cc.error || typeof cc.value !== 'number' || !Number.isFinite(cc.value)) return '';
   const v = cc.value;
   if ((cc.critGt != null && v >= cc.critGt) || (cc.critLt != null && v <= cc.critLt)) return 'crit';
   if ((cc.warnGt != null && v >= cc.warnGt) || (cc.warnLt != null && v <= cc.warnLt)) return 'warn';
@@ -1935,17 +2132,21 @@ function renderCustomCounterCards(DATA, hist) {
   hist = hist || (serverState.get(DATA.server_id)?.history) || [];
   return ccs.map(cc => {
     const cls = counterCls(cc);
-    const val = cc.error ? '—' : (typeof cc.value === 'number' ? fmtInt(cc.value) : esc(String(cc.value ?? '—')));
-    const unit = cc.error ? '' : esc(cc.unit || '');
-    const hint = cc.error ? `<span style="color:var(--cp-danger)">${esc(cc.error)}</span>` : esc(cc.description || 'Custom counter');
+    const usable = cc.enabled !== false && !cc.stale && !cc.error && typeof cc.value === 'number' && Number.isFinite(cc.value);
+    const val = usable ? fmtInt(cc.value) : '—';
+    const unit = usable ? esc(cc.unit || '') : '';
+    const hint = cc.enabled === false ? 'Sampling paused' : cc.error ? `<span style="color:var(--cp-danger)">${esc(cc.error)}</span>`
+      : cc.stale ? 'Stale sample — waiting for collection' : usable ? esc(cc.description || 'Custom counter') : 'Waiting for first sample';
+    const sampleNote = `${cc.sampledAt ? 'Sampled '+fmtDate(cc.sampledAt) : ''}${cc.intervalSeconds ? ' · every '+cc.intervalSeconds+'s' : ''}${cc.cached && usable ? ' · cached' : ''}`;
     // Build spark from history.custom[cc.id]
     const values = hist.map(s => (s.custom && typeof s.custom[cc.id] === 'number') ? s.custom[cc.id] : null);
     const spark = renderSparklineFromValues(values);
     return `<div class="kpi ${cls}">
-      <div class="badge ${cls}">CUSTOM</div>
+      <div class="badge ${cls}">${cc.enabled === false ? 'PAUSED' : cc.stale ? 'STALE' : 'CUSTOM'}</div>
       <div class="label">${esc(cc.name)}</div>
       <div class="value">${val}${unit ? ' <span style="font-size:14px;color:var(--cp-text-secondary);">'+unit+'</span>' : ''}</div>
       <div class="hint">${hint}</div>
+      ${sampleNote ? `<div class="hint">${esc(sampleNote.replace(/^ · /, ''))}</div>` : ''}
       ${spark}
     </div>`;
   }).join('');
@@ -1977,15 +2178,18 @@ function renderSparklineFromValues(values) {
 }
 
 function renderHealth(DATA){
+  if (dashboardView !== 'detail') return;
   const h = computeHealth(DATA);
   const sem = el('semaphore');
-  sem.classList.remove('healthy','warning','critical');
-  sem.classList.add(h.level);
+  sem.classList.remove('healthy','warning','critical','unknown');
+  if (['healthy','warning','critical'].includes(h.level)) sem.classList.add(h.level);
   el('health-label').textContent = h.label;
   const parts = [];
   if (h.critical.length > 0) parts.push(`<h4 class="crit">Critical (${h.critical.length})</h4><ul>${h.critical.map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`);
   if (h.warning.length > 0) parts.push(`<h4 class="warn">Warnings (${h.warning.length})</h4><ul>${h.warning.map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`);
-  if (parts.length === 0) parts.push(`<h4 class="ok">All clear</h4><div class="none">No performance issues detected.</div>`);
+  if (parts.length === 0) parts.push(h.level === 'healthy'
+    ? `<h4 class="ok">All clear</h4><div class="none">No performance issues detected.</div>`
+    : `<h4>Health unknown</h4><div class="none">Insufficient measurements to assess health. Missing values are not zero.</div>`);
   el('health-popover').innerHTML = parts.join('');
 }
 
@@ -2002,25 +2206,23 @@ document.addEventListener('click', (e) => {
 });
 
 function render(DATA, PREV){
+  if (dashboardView !== 'detail' || (DATA.server_id && DATA.server_id !== activeServerId)) return;
   try {
     renderHealth(DATA);
     const i = DATA.instance || {};
     const p = PREV ? PREV.instance : null;
     const cur = servers.find(s=>s.id===activeServerId);
-    const engine = DATA.engine;
+    const engine = fleetHelpers.sqlServiceKind(cur || {}, DATA);
     const isAzureDb = engine === 'azure-sqldb';
     const isAzureMi = engine === 'azure-mi';
-    const engineBadge = isAzureDb
-      ? '<span class="engine-badge">Azure SQL DB</span>'
-      : isAzureMi
-      ? '<span class="engine-badge">Azure SQL MI</span>'
-      : '';
+    const engineBadge = fleetHelpers.serviceBadge(cur || {}, DATA);
     // For back-compat with the old `isAzure` boolean below (Azure SQL DB constraints)
     const isAzure = isAzureDb;
-    el('current-server-title').innerHTML = esc(cur?.name || 'SQL Server') + engineBadge;
+    el('current-server-title').innerHTML = esc(cur?.name || 'SQL Server') + engineBadge + ' '+fleetHelpers.pausedBadge(cur);
     el('current-server-sub').textContent = isAzureDb
       ? `${cur?.server||''} · db: ${cur?.database||'?'} · ${i.edition||''} v${i.product_version||''} · collected in ${DATA.collect_ms||'?'}ms`
       : `${i.server_name||cur?.server||''} · ${i.edition||''} · v${i.product_version||''} ${i.product_level||''}${i.uptime_min!=null?' · up '+(i.uptime_min/60).toFixed(1)+'h':''} · collected in ${DATA.collect_ms||'?'}ms`;
+    if (cur?.monitoringPaused) el('current-server-sub').textContent += ' · monitoring paused · last collected sample';
 
     // Toggle "unsupported" gray-out based on engine
     el('buffer-card').classList.toggle('disabled', DATA.buffer_pool === null);
@@ -2054,21 +2256,56 @@ function render(DATA, PREV){
       ];
     }
     const hist = (serverState.get(DATA.server_id)?.history) || [];
+    const fields = {
+      'Avg CPU %':'avg_cpu_percent', 'Avg Memory %':'avg_memory_percent',
+      'Data I/O %':'avg_data_io_percent', 'Log Write %':'avg_log_write_percent',
+      'Page Life Expectancy':'page_life_expectancy', 'Buffer Cache Hit Ratio':'buffer_cache_hit_ratio_base',
+      'Sessions / Connections':'user_sessions', 'Active Requests':'active_requests',
+      'Memory In Use':'memory_in_use_mb', 'Batch Requests (cum)':'batch_requests_per_sec_cum',
+      'CPU Cores':'cpu_count', 'Uptime':'uptime_min',
+    };
+    kpis.forEach(kpi => {
+      const field = fields[kpi.label];
+      kpi.available = !field || (typeof i[field] === 'number' && Number.isFinite(i[field]) && (field !== 'buffer_cache_hit_ratio_base' || (i[field] > 0 && typeof i.buffer_cache_hit_ratio === 'number' && Number.isFinite(i.buffer_cache_hit_ratio))));
+      if (kpi.label === 'Sessions / Connections') {
+        kpi.value = `${fmtInt(i.user_sessions)} / ${fmtInt(i.connections)}`;
+        kpi.hint = `${fmtInt(i.active_requests)} active, ${fmtInt(i.blocked_requests)} blocked`;
+      } else if (kpi.label === 'Active Requests') kpi.hint = `${fmtInt(i.blocked_requests)} blocked`;
+      if (!kpi.available) { kpi.value = '—'; kpi.hint = 'Metric unavailable in this sample'; kpi.cls = ''; kpi.badge = ''; kpi.d = null; }
+    });
     el('kpis').innerHTML = kpis.map(k=>`
-      <div class="kpi ${k.cls||''}">
+      <div class="kpi ${k.cls||''}" data-ai-panel="instance">
         ${k.d && k.d.txt ? `<div class="delta ${k.d.cls}">${k.d.txt}</div>` : (k.badge?`<div class="badge ${k.cls||''}">${k.badge}</div>`:'')}
         <div class="label">${k.label}</div>
         <div class="value">${k.value}</div>
         <div class="hint">${k.hint||''}</div>
         ${k.spark ? renderSparkline(hist, k.spark) : ''}
+        <button type="button" class="btn ghost panel-ai" data-ai-scope="instance" data-ai-metric="${esc(k.label)}"${k.available ? '' : ' data-ai-unavailable="true"'} disabled>Ask AI</button>
       </div>`).join('') + renderCustomCounterCards(DATA, hist);
+    Array.from(el('kpis').children).slice(kpis.length).forEach((card, index) => {
+      const counter = DATA.custom_counters?.[index];
+      if (!counter) return;
+      card.dataset.aiPanel = 'custom_counters';
+      if (card.querySelector('[data-ai-scope]')) return;
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'btn ghost panel-ai';
+      button.dataset.aiScope = 'custom_counters';
+      button.dataset.aiCounterId = counter.id;
+      button.dataset.aiMetric = counter.id;
+      button.textContent = 'Ask AI';
+      button.disabled = true;
+      card.appendChild(button);
+    });
 
     // Timeline chart from history buffer
     renderTimeline(hist, DATA);
 
     // Narrative — sourced from computeHealth() so it always matches the semaphore
     const h = computeHealth(DATA);
-    if (h.critical.length === 0 && h.warning.length === 0) {
+    if (h.level === 'unknown' || h.level === 'unavailable') {
+      el('narrative').textContent = 'Instance metrics are unavailable. No health assessment can be made from this sample.';
+    } else if (h.level === 'healthy') {
       el('narrative').innerHTML = '<b>Health summary:</b> No pressing issues detected. Instance looks healthy.';
     } else {
       const parts = [];
@@ -2146,7 +2383,7 @@ function render(DATA, PREV){
 
     const heatWarn = isAzure || DATA.engine === 'azure-mi' ? 30 : 10;
     const heatCrit = isAzure || DATA.engine === 'azure-mi' ? 100 : 20;
-    el('fileio-sub').textContent = `Per-file read/write stalls — green <${heatWarn}ms, amber ${heatWarn}-${heatCrit}ms, red >${heatCrit}ms`;
+    el('fileio-sub').textContent = `Per-file cumulative read/write stalls (since stats reset) — green <${heatWarn}ms, amber ${heatWarn}-${heatCrit}ms, red >${heatCrit}ms`;
     const heat = (ms)=>{
       if(ms==null) return "";
       if(ms<heatWarn) return "background:rgba(22,163,74,0.15);color:var(--cp-success);";
@@ -2164,7 +2401,9 @@ function render(DATA, PREV){
       </tr>`).join('') || '<tr><td colspan="6" class="empty">No file I/O data.</td></tr>';
 
     el('databases').innerHTML = (DATA.databases||[]).map(d=>{
-      const backupPill = !d.last_full_backup
+      const backupPill = (isAzureDb || isAzureMi) && !d.last_full_backup
+          ? '<span class="pill muted" title="Service-managed backup history is not exposed by this sample">service-managed</span>'
+          : !d.last_full_backup
         ? '<span class="pill crit">never</span>'
         : ((Date.now()-new Date(d.last_full_backup).getTime())/86400000 > 7
             ? `<span class="pill warn">${ago(d.last_full_backup)}</span>`
@@ -2310,6 +2549,9 @@ function render(DATA, PREV){
         b.addEventListener('click', () => openLivePlan(b.dataset.plan, b.dataset.spid));
       });
     }
+    updateDetailActions(DATA);
+    renderSectionFreshness(DATA);
+    countersController?.refreshSamples();
   } catch(e){
     console.error('Render error:', e);
     el('err').textContent = `Render error: ${e.message}`;
@@ -2325,7 +2567,13 @@ el('detail-backdrop').addEventListener('mouseup', (e)=>{
   if(detailMouseDownTarget && detailMouseDownTarget.id==='detail-backdrop' && e.target.id==='detail-backdrop') closeDetail();
   detailMouseDownTarget = null;
 });
-document.addEventListener('keydown', (e)=>{ if(e.key==='Escape'){ closeDetail(); closeModal(); } });
+document.addEventListener('keydown', e => {
+  if (['confirm-backdrop','ai-backdrop','counters-backdrop','alert-settings-backdrop'].some(id => el(id)?.classList.contains('show'))) return;
+  if (e.key === 'Escape') {
+    el('alerts-backdrop').classList.remove('show');
+    closeDetail(); closeModal();
+  }
+});
 
 function closeDetail(){ el('detail-backdrop').classList.remove('show'); }
 function openDetail(title, sub, bodyHtml){
@@ -2687,9 +2935,9 @@ function generateIndexName(m){
   return `IX_${m.table_name}_${parts}`.slice(0,120);
 }
 
-// Countdown tick — pauses when paused=true
+// Countdown is scoped to the current view or selected server.
 setInterval(()=>{
-  if(paused) return;
+  if(currentViewPaused() || document.hidden || !dashboardStarted || pauseUpdates.has(activeServerId)) return;
   countdown--;
   el('countdown').textContent = formatCountdown(Math.max(0,countdown));
   const dashLen = 2 * Math.PI * 18;
@@ -2697,20 +2945,19 @@ setInterval(()=>{
   el('ring-fg').setAttribute('stroke-dashoffset', offset);
   if(countdown<=0){
     countdown = refreshSeconds;
-    fetchMetrics();
+    refreshCurrentView();
   }
 },1000);
 
 // Initial load
 (async function init(){
+  await Promise.all([sqlEndpointReady, healthReady, fleetReady, aiReady, countersReady, alertsReady]);
+  setStatus('paused','Review the usage disclaimer');
+  await (await disclaimerReady).ensureAcknowledged();
   await loadServers();
-  if(servers.length>0){
-    setActiveServer(servers[0].id);
-  } else {
-    renderEmpty();
-    setStatus('paused','No servers');
-  }
-})();
+  dashboardStarted = true;
+  setDashboardView('overview');
+})().catch(error => showRegistryError('Initialization failed', error));
 </script>
 </body>
 </html>

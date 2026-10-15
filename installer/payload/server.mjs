@@ -1,19 +1,33 @@
 import http from 'node:http';
-import { readFile, writeFile, mkdir, access, chmod } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { readFile, writeFile, mkdir, access, mkdtemp, rm } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
+import { atomicWriteFile, createJsonStore, validateServerRegistry } from './storage.mjs';
+import { createCollectorCache, createAsyncLimiter, createSectionCache, configIdentity, connectionIdentity } from './collector-cache.mjs';
+import { createMonitorScheduler } from './monitor-scheduler.mjs';
+import { computeHealth } from './health.js';
+import { createAlertService } from './alerts.mjs';
+import { createMicrosoftEmailAuth } from './microsoft-email-auth.mjs';
+import { createCounterRunner, normalizeCounter, validateCounterSql } from './counters.mjs';
+import { createAiProviders } from './ai-providers.mjs';
+import { createAiPreviewStore } from './ai-preview.mjs';
+import { sqlcmdPaths } from './sqlcmd-paths.mjs';
+import { classifySqlEndpoint } from './sql-endpoint.js';
+import { createAzureSqlAuth } from './azure-sql-auth.mjs';
+import { createConnectionProgress, connectionAbortError, throwIfConnectionAborted, commitConnection } from './connection-progress.mjs';
+import { buildSqlcmdArgs, validateConnectionConfig, sqlcmdEnvironment, sqlcmdFailure, redactSqlDiagnostic } from './sqlcmd-options.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PORT = 8765;
+const DATA_DIR = path.resolve(process.env.SQL_DASHBOARD_DATA_DIR || __dirname);
+const PORT = Number(process.env.SQL_DASHBOARD_PORT ?? 8765);
+if (!Number.isInteger(PORT) || PORT < 0 || PORT > 65535) throw new Error('Invalid SQL_DASHBOARD_PORT');
 const HTML = path.join(__dirname, 'index.html');
-const SQLCMD = 'C:\\Program Files\\Microsoft SQL Server\\Client SDK\\ODBC\\170\\Tools\\Binn\\SQLCMD.EXE';
-const GO_SQLCMD = 'C:\\Program Files\\SqlCmd\\sqlcmd.exe';
-const SERVERS_FILE = path.join(__dirname, 'servers.json');
-const KEY_FILE = path.join(__dirname, '.encryption-key');
-const TMP_DIR = path.join(__dirname, 'tmp');
+const { go: GO_SQLCMD } = sqlcmdPaths();
+const SERVERS_FILE = path.join(DATA_DIR, 'servers.json');
+const KEY_FILE = path.join(DATA_DIR, '.encryption-key');
+const TMP_DIR = path.join(DATA_DIR, 'tmp');
 
 // ==============================
 // Password encryption at rest (AES-256-GCM),
@@ -59,8 +73,11 @@ function dpapiUnprotect(b64) {
 // Key file stores DPAPI-wrapped random 32-byte AES key.
 // Header 'dpapi:v1:' marks the format; legacy raw-32-byte key files auto-upgrade.
 async function getKey() {
-  if (existsSync(KEY_FILE)) {
-    const raw = await readFile(KEY_FILE, 'utf8').catch(async () => (await readFile(KEY_FILE)).toString('binary'));
+  let legacy;
+  try { legacy = await readFile(KEY_FILE); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+  if (legacy) {
+    const raw = legacy.toString('utf8');
     if (raw.startsWith('dpapi:v1:')) {
       const b64 = raw.slice('dpapi:v1:'.length).trim();
       const bytes = await dpapiUnprotect(b64);
@@ -68,11 +85,9 @@ async function getKey() {
       return bytes;
     }
     // Legacy: raw 32-byte key on disk. Upgrade to DPAPI wrapping.
-    const legacy = await readFile(KEY_FILE);
     if (legacy.length === 32) {
       const wrapped = await dpapiProtect(legacy);
-      await writeFile(KEY_FILE, 'dpapi:v1:' + wrapped, 'utf8');
-      try { await chmod(KEY_FILE, 0o600); } catch {}
+      await atomicWriteFile(KEY_FILE, 'dpapi:v1:' + wrapped);
       console.log('Upgraded legacy AES key to DPAPI-wrapped form');
       return legacy;
     }
@@ -80,13 +95,17 @@ async function getKey() {
   }
   const k = crypto.randomBytes(32);
   const wrapped = await dpapiProtect(k);
-  await writeFile(KEY_FILE, 'dpapi:v1:' + wrapped, 'utf8');
-  try { await chmod(KEY_FILE, 0o600); } catch {}
+  await atomicWriteFile(KEY_FILE, 'dpapi:v1:' + wrapped);
   console.log('Generated new DPAPI-wrapped encryption key at', KEY_FILE);
   return k;
 }
-let cachedKey = null;
-async function key() { if (!cachedKey) cachedKey = await getKey(); return cachedKey; }
+let keyPromise = null;
+async function key() {
+  if (!keyPromise) {
+    keyPromise = getKey().catch(error => { keyPromise = null; throw error; });
+  }
+  return keyPromise;
+}
 
 async function encryptPassword(plain) {
   if (!plain) return '';
@@ -102,6 +121,8 @@ async function encryptPassword(plain) {
 async function decryptPassword(str) {
   if (!str) return '';
   if (!str.startsWith('enc:v1:')) return String(str); // legacy plaintext
+  // Never replace a missing key while trying to read existing ciphertext.
+  await access(KEY_FILE);
   const [, , ivB, tagB, ctB] = str.split(':');
   const k = await key();
   const decipher = crypto.createDecipheriv('aes-256-gcm', k, Buffer.from(ivB, 'base64'));
@@ -112,61 +133,57 @@ async function decryptPassword(str) {
 
 await mkdir(TMP_DIR, { recursive: true });
 
-// Sweep tmp/ files older than 1 hour once per hour (hygiene)
+// Sweep abandoned SQL scratch files/directories older than 1 hour once per hour.
 setInterval(async () => {
   try {
-    const { readdir, stat, unlink } = await import('node:fs/promises');
+    const { readdir, stat } = await import('node:fs/promises');
     const files = await readdir(TMP_DIR);
     const cutoff = Date.now() - 3600000;
     for (const f of files) {
       const p = path.join(TMP_DIR, f);
       try {
         const s = await stat(p);
-        if (s.mtimeMs < cutoff) await unlink(p);
-      } catch {}
+        if (s.mtimeMs < cutoff) await rm(p, { recursive: true, force: true });
+      } catch (error) { console.error(`SQL scratch sweep failed: ${error.message}`); }
     }
-  } catch {}
+  } catch (error) { console.error(`SQL scratch sweep failed: ${error.message}`); }
 }, 3600000);
 
 // ---------- Server registry ----------
 // On disk servers.json holds `passwordEnc` (AES-256-GCM ciphertext string).
-// In memory, `password` is decrypted; `passwordEnc` may still be present.
-async function loadServers() {
-  try {
-    const raw = await readFile(SERVERS_FILE, 'utf8');
-    const list = JSON.parse(raw);
-    let migrated = false;
-    for (const s of list) {
-      if (s.password && !s.passwordEnc) {
-        s.passwordEnc = await encryptPassword(s.password);
-        migrated = true;
+// Only runnable copies contain a decrypted password.
+const serverStore = createJsonStore(SERVERS_FILE, () => [], list => {
+  validateServerRegistry(list);
+  for (const cfg of list) validateConnectionConfig(cfg, { requireDatabase: false });
+});
+let registryReady = null;
+async function initializeRegistry() {
+  if (!registryReady) {
+    registryReady = serverStore.update(async list => {
+      for (const s of list) {
+        if (s.passwordEnc) await decryptPassword(s.passwordEnc);
+        if (s.password && !s.passwordEnc) s.passwordEnc = await encryptPassword(s.password);
+        delete s.password;
       }
-      // Strip plaintext key from disk shape (even if empty string)
-      if ('password' in s) { delete s.password; migrated = true; }
-    }
-    if (migrated) await writeFile(SERVERS_FILE, JSON.stringify(list, null, 2), 'utf8');
-    return list;
-  } catch {
-    const seed = [{
-      id: 'local-sqlsrv2025ent',
-      name: 'Local SQLSRV2025ENT',
-      server: 'TABLET-LUISBOR2\\SQLSRV2025ENT',
-      auth: 'windows',
-      user: '', passwordEnc: '',
-      addedAt: new Date().toISOString(),
-    }];
-    await writeFile(SERVERS_FILE, JSON.stringify(seed, null, 2), 'utf8');
-    return seed;
+    }).catch(error => { registryReady = null; throw error; });
   }
+  await registryReady;
 }
-
-async function saveServers(list) {
-  // Persist only encrypted form
-  const clean = list.map(s => {
-    const { password, ...rest } = s;
-    return rest;
-  });
-  await writeFile(SERVERS_FILE, JSON.stringify(clean, null, 2), 'utf8');
+async function loadServers() {
+  await initializeRegistry();
+  return serverStore.read();
+}
+async function updateServers(mutator) {
+  await initializeRegistry();
+  return serverStore.update(mutator);
+}
+function requestError(status, message) {
+  return Object.assign(new Error(message), { status });
+}
+function findServer(list, id) {
+  const cfg = list.find(s => s.id === id);
+  if (!cfg) throw requestError(404, 'server not found');
+  return cfg;
 }
 
 // Get a runnable copy with password decrypted
@@ -176,81 +193,13 @@ async function resolveServer(s) {
   return clone;
 }
 
-// Return sqlcmd arg list for auth + connection options
-// ==============================
-// Azure CLI session bootstrap for Entra ID Interactive (MFA)
-// Uses `az account get-access-token` as a fast "is there a session?" check.
-// If no session, runs `az login` interactively (browser popup ONCE); after that,
-// every sqlcmd call uses --authentication-method=ActiveDirectoryAzCli which
-// silently reuses that cached session — no more prompts until refresh token
-// expires (~90 days).
-// ==============================
-const azLoginLock = new Map();  // serverId -> Promise
+const azureSqlAuth = createAzureSqlAuth();
+const connectionProgress = createConnectionProgress();
+function pickSqlcmd() { return GO_SQLCMD; }
 
-async function ensureAzCliSession(cfg) {
-  if (cfg.auth !== 'azuread-interactive') return;
-  if (azLoginLock.has(cfg.id)) return azLoginLock.get(cfg.id);
-
-  const p = (async () => {
-    // Fast check: is `az` already logged in with a token for SQL?
-    const check = await new Promise((resolve) => {
-      execFile('az',
-        ['account', 'get-access-token', '--resource', 'https://database.windows.net/', '--query', 'expiresOn', '-o', 'tsv'],
-        { timeout: 10000, windowsHide: true, shell: true },
-        (err, stdout) => resolve({ ok: !err && stdout.trim().length > 0, expires: stdout.trim() }));
-    });
-    if (check.ok) {
-      console.log(`Azure CLI session valid for ${cfg.id}, expires ${check.expires}`);
-      return;
-    }
-    // No session — run az login interactively (browser popup, one time)
-    console.log(`No valid Azure CLI session — launching az login for ${cfg.id}`);
-    const loginArgs = ['login'];
-    if (cfg.user) { loginArgs.push('--username', cfg.user); }
-    await new Promise((resolve, reject) => {
-      execFile('az', loginArgs, { timeout: 180000, windowsHide: false, shell: true },
-        (err, stdout, stderr) => err ? reject(new Error(`az login failed: ${(stderr||err.message).slice(0,300)}`)) : resolve());
-    });
-    console.log(`az login completed for ${cfg.id}`);
-  })();
-  azLoginLock.set(cfg.id, p);
-  try { await p; } finally { azLoginLock.delete(cfg.id); }
-}
-
-function buildSqlcmdArgs(cfg, extraArgs = [], opts = {}) {
-  const args = ['-S', cfg.server];
-  switch (cfg.auth) {
-    case 'windows': args.push('-E'); break;
-    case 'sqlauth': args.push('-U', cfg.user, '-P', cfg.password); break;
-    case 'azuread-integrated':
-      args.push('--authentication-method=ActiveDirectoryIntegrated');
-      if (cfg.user) args.push('-U', cfg.user);
-      break;
-    case 'azuread-password': args.push('-G', '-U', cfg.user, '-P', cfg.password); break;
-    case 'azuread-interactive':
-      // go-sqlcmd v1.10 doesn't support ActiveDirectoryAccessToken but does
-      // support ActiveDirectoryAzCli which reuses the Azure CLI cached session.
-      // We run `az login` once (or reuse an existing session), and all future
-      // sqlcmd calls silently reuse the same cached token — no browser popup.
-      if (opts.useAccessToken) {
-        args.push('--authentication-method=ActiveDirectoryAzCli');
-      } else {
-        args.push('--authentication-method=ActiveDirectoryInteractive');
-        if (cfg.user) args.push('-U', cfg.user);
-      }
-      break;
-    default: args.push('-E');
-  }
-  if (cfg.database) args.push('-d', cfg.database);
-  if (cfg.encrypt !== false) args.push('-N');
-  if (cfg.trustCert !== false) args.push('-C');
-  return args.concat(extraArgs);
-}
-
-// Use go-sqlcmd for any Entra Integrated OR Interactive (both use --authentication-method flag)
-function pickSqlcmd(cfg) {
-  if (cfg.auth === 'azuread-integrated' || cfg.auth === 'azuread-interactive') return GO_SQLCMD;
-  return SQLCMD;
+function validateRequestConnection(cfg, options) {
+  try { return validateConnectionConfig(cfg, options); }
+  catch (error) { throw requestError(400, error.message); }
 }
 
 // ---------- SQL batch ----------
@@ -275,42 +224,39 @@ const WAIT_EXCLUDES = [
 //   1 = Personal, 2 = Standard, 3 = Enterprise (on-prem)
 //   4 = Express, 5 = Azure SQL Database, 6 = Azure Synapse, 8 = Azure SQL Managed Instance,
 //   9 = Azure SQL Edge, 11 = Azure Synapse Serverless
-function isAzureSqlDb(cfg) { return Number(cfg.engineEdition) === 5; }
-function isAzureManagedInstance(cfg) { return Number(cfg.engineEdition) === 8; }
-// Fallback: if engineEdition not cached yet, probe by hostname (best-effort)
-function looksAzureHost(cfg) { return /\.database\.windows\.net$/i.test((cfg.server||'').trim()); }
-function isAzureDbLike(cfg) {
-  if (cfg.engineEdition) return isAzureSqlDb(cfg);
-  return looksAzureHost(cfg); // Assume DB by default; MI users should re-probe
-}
+function sqlEndpoint(cfg) { return classifySqlEndpoint(cfg.server, cfg.connectionType || 'auto', cfg.engineEdition); }
+function isAzureSqlDb(cfg) { return sqlEndpoint(cfg).kind === 'azure-sqldb'; }
+function isAzureManagedInstance(cfg) { return sqlEndpoint(cfg).kind === 'azure-mi'; }
+function isAzureDbLike(cfg) { return isAzureSqlDb(cfg); }
 
 // Azure SQL Database has a different DMV surface. Sections not available on
 // Azure return JSON null so the UI grays them out.
-const MEGA_SQL_AZURE = `
+const TOP_QUERIES_SQL_AZURE = `
 SET NOCOUNT ON;
-SET ANSI_WARNINGS OFF;
-
-DECLARE @topq NVARCHAR(MAX) = N'[]';
-BEGIN TRY
-  DECLARE @tmp NVARCHAR(MAX);
-  SELECT @tmp = (
+SET ANSI_WARNINGS ON;
+SELECT JSON_QUERY((
     SELECT TOP 15 DB_NAME() AS db_name, q.query_id, SUM(rs.count_executions) AS execs,
       CAST(SUM(rs.avg_cpu_time*rs.count_executions)/1000.0 AS DECIMAL(18,1)) AS total_cpu_ms,
-      CAST(AVG(rs.avg_cpu_time)/1000.0 AS DECIMAL(18,1)) AS avg_cpu_ms,
-      CAST(AVG(rs.avg_duration)/1000.0 AS DECIMAL(18,1)) AS avg_dur_ms,
-      CAST(AVG(rs.avg_logical_io_reads) AS BIGINT) AS avg_reads,
+      CAST(SUM(rs.avg_cpu_time*rs.count_executions)/NULLIF(SUM(rs.count_executions),0)/1000.0 AS DECIMAL(18,1)) AS avg_cpu_ms,
+      CAST(SUM(rs.avg_duration*rs.count_executions)/NULLIF(SUM(rs.count_executions),0)/1000.0 AS DECIMAL(18,1)) AS avg_dur_ms,
+      CAST(SUM(rs.avg_logical_io_reads*rs.count_executions)/NULLIF(SUM(rs.count_executions),0) AS BIGINT) AS avg_reads,
       MAX(rs.last_execution_time) AS last_exec,
       LEFT(REPLACE(REPLACE(REPLACE(qt.query_sql_text,CHAR(13),' '),CHAR(10),' '),CHAR(9),' '),300) AS query_text
     FROM sys.query_store_query q
     JOIN sys.query_store_query_text qt ON q.query_text_id=qt.query_text_id
     JOIN sys.query_store_plan p ON p.query_id=q.query_id
     JOIN sys.query_store_runtime_stats rs ON rs.plan_id=p.plan_id
+    JOIN sys.query_store_runtime_stats_interval ri ON ri.runtime_stats_interval_id=rs.runtime_stats_interval_id
+    WHERE ri.end_time >= DATEADD(HOUR,-1,SYSUTCDATETIME())
     GROUP BY q.query_id, qt.query_sql_text
     ORDER BY total_cpu_ms DESC
-    FOR JSON PATH);
-  IF @tmp IS NOT NULL SET @topq = @tmp;
-END TRY BEGIN CATCH SET @topq = N'[]'; END CATCH;
+    FOR JSON PATH)) AS top_queries
+FOR JSON PATH, WITHOUT_ARRAY_WRAPPER;
+`;
 
+const MEGA_SQL_AZURE = `
+SET NOCOUNT ON;
+SET ANSI_WARNINGS ON;
 SELECT
   JSON_QUERY((SELECT
      @@SERVERNAME AS server_name,
@@ -329,14 +275,6 @@ SELECT
      (SELECT COUNT(*) FROM sys.dm_exec_requests WHERE session_id > 50) AS active_requests,
      (SELECT COUNT(*) FROM sys.dm_exec_requests WHERE blocking_session_id <> 0) AS blocked_requests
    FOR JSON PATH, WITHOUT_ARRAY_WRAPPER)) AS instance,
-  JSON_QUERY((SELECT DB_NAME() AS name, 'ONLINE' AS state, 'FULL' AS recovery,
-     (SELECT compatibility_level FROM sys.databases WHERE database_id = DB_ID()) AS compat,
-     CAST(SUM(CASE WHEN type=0 THEN size END)*8.0/1024 AS DECIMAL(18,1)) AS data_mb,
-     CAST(SUM(CASE WHEN type=1 THEN size END)*8.0/1024 AS DECIMAL(18,1)) AS log_mb,
-     NULL AS last_full_backup, NULL AS last_log_backup,
-     (SELECT CAST(actual_state AS INT) FROM sys.database_query_store_options) AS qs_on
-   FROM sys.database_files
-   FOR JSON PATH)) AS databases,
   JSON_QUERY((SELECT TOP 12 wait_type,
      CAST(wait_time_ms/1000.0 AS DECIMAL(18,3)) AS wait_time_s,
      waiting_tasks_count AS tasks,
@@ -362,23 +300,8 @@ SELECT
    FROM sys.dm_io_virtual_file_stats(DB_ID(),NULL) f
    JOIN sys.database_files mf ON f.file_id=mf.file_id
    ORDER BY (f.io_stall_read_ms + f.io_stall_write_ms) DESC
-   FOR JSON PATH)) AS file_io,
+  FOR JSON PATH)) AS file_io,
   CAST(NULL AS NVARCHAR(MAX)) AS buffer_pool,
-  JSON_QUERY(@topq) AS top_queries,
-  JSON_QUERY((SELECT TOP 15 DB_NAME() AS db_name,
-     OBJECT_SCHEMA_NAME(mid.object_id) AS schema_name,
-     OBJECT_NAME(mid.object_id) AS table_name,
-     migs.user_seeks + migs.user_scans AS user_impact_count,
-     CAST(migs.avg_total_user_cost*(migs.avg_user_impact/100.0)*(migs.user_seeks+migs.user_scans) AS BIGINT) AS improvement_score,
-     ISNULL(mid.equality_columns,'') AS eq_cols,
-     ISNULL(mid.inequality_columns,'') AS ineq_cols,
-     ISNULL(mid.included_columns,'') AS included_cols
-   FROM sys.dm_db_missing_index_groups mig
-   JOIN sys.dm_db_missing_index_group_stats migs ON mig.index_group_handle = migs.group_handle
-   JOIN sys.dm_db_missing_index_details mid ON mig.index_handle = mid.index_handle
-   WHERE mid.database_id = DB_ID()
-   ORDER BY improvement_score DESC
-   FOR JSON PATH)) AS missing_indexes,
   JSON_QUERY((SELECT TOP 20 s.session_id, s.login_name, s.host_name, s.program_name,
      r.status, r.command, r.wait_type, r.wait_time AS wait_ms, r.blocking_session_id AS blocked_by,
      DB_NAME(r.database_id) AS db_name,
@@ -393,22 +316,28 @@ SELECT
 FOR JSON PATH, WITHOUT_ARRAY_WRAPPER;
 `;
 
-// On-prem MEGA batch below (existing)
+// Frequent instance counters exclude buffer descriptor scans, backup history and Query Store.
 const MEGA_SQL = `
 SET NOCOUNT ON;
-SET ANSI_WARNINGS OFF;
+SET ANSI_WARNINGS ON;
 SELECT
   JSON_QUERY((SELECT
      @@SERVERNAME AS server_name,
      CAST(SERVERPROPERTY('ProductVersion') AS NVARCHAR(64)) AS product_version,
      CAST(SERVERPROPERTY('Edition') AS NVARCHAR(128)) AS edition,
      CAST(ISNULL(SERVERPROPERTY('ProductLevel'),'') AS NVARCHAR(32)) AS product_level,
+     CAST(SERVERPROPERTY('EngineEdition') AS INT) AS engine_edition,
      (SELECT sqlserver_start_time FROM sys.dm_os_sys_info) AS sqlserver_start_time,
      DATEDIFF(MINUTE,(SELECT sqlserver_start_time FROM sys.dm_os_sys_info),GETDATE()) AS uptime_min,
      (SELECT cpu_count FROM sys.dm_os_sys_info) AS cpu_count,
      (SELECT physical_memory_kb/1024 FROM sys.dm_os_sys_info) AS physical_memory_mb,
      (SELECT committed_target_kb/1024 FROM sys.dm_os_sys_info) AS target_memory_mb,
      (SELECT physical_memory_in_use_kb/1024 FROM sys.dm_os_process_memory) AS memory_in_use_mb,
+     (SELECT TOP 1 CAST(record AS XML).value('(//SystemHealth/ProcessUtilization)[1]','int')
+      FROM sys.dm_os_ring_buffers WHERE ring_buffer_type=N'RING_BUFFER_SCHEDULER_MONITOR'
+        AND record LIKE '%<SystemHealth>%' ORDER BY timestamp DESC) AS avg_cpu_percent,
+     (SELECT CAST(p.physical_memory_in_use_kb*100.0/NULLIF(s.physical_memory_kb,0) AS DECIMAL(6,2))
+      FROM sys.dm_os_process_memory p CROSS JOIN sys.dm_os_sys_info s) AS avg_memory_percent,
      (SELECT COUNT(*) FROM sys.dm_exec_connections) AS connections,
      (SELECT COUNT(*) FROM sys.dm_exec_sessions WHERE is_user_process=1) AS user_sessions,
      (SELECT COUNT(*) FROM sys.dm_exec_requests WHERE session_id > 50) AS active_requests,
@@ -419,16 +348,6 @@ SELECT
      ISNULL((SELECT cntr_value FROM sys.dm_os_performance_counters WHERE counter_name='Buffer cache hit ratio'),0) AS buffer_cache_hit_ratio,
      ISNULL((SELECT cntr_value FROM sys.dm_os_performance_counters WHERE counter_name='Buffer cache hit ratio base'),0) AS buffer_cache_hit_ratio_base
    FOR JSON PATH, WITHOUT_ARRAY_WRAPPER)) AS instance,
-  JSON_QUERY((SELECT d.name, d.state_desc AS state, d.recovery_model_desc AS recovery, d.compatibility_level AS compat,
-     CAST(SUM(CASE WHEN f.type=0 THEN f.size END)*8.0/1024 AS DECIMAL(18,1)) AS data_mb,
-     CAST(SUM(CASE WHEN f.type=1 THEN f.size END)*8.0/1024 AS DECIMAL(18,1)) AS log_mb,
-     (SELECT MAX(backup_finish_date) FROM msdb.dbo.backupset b WHERE b.database_name=d.name AND b.type='D') AS last_full_backup,
-     (SELECT MAX(backup_finish_date) FROM msdb.dbo.backupset b WHERE b.database_name=d.name AND b.type='L') AS last_log_backup,
-     CAST(d.is_query_store_on AS INT) AS qs_on
-   FROM sys.databases d JOIN sys.master_files f ON d.database_id=f.database_id
-   GROUP BY d.name, d.state_desc, d.recovery_model_desc, d.compatibility_level, d.is_query_store_on
-   ORDER BY d.name
-   FOR JSON PATH)) AS databases,
   JSON_QUERY((SELECT TOP 12 wait_type,
      CAST(wait_time_ms/1000.0 AS DECIMAL(18,3)) AS wait_time_s,
      waiting_tasks_count AS tasks,
@@ -448,24 +367,6 @@ SELECT
    JOIN sys.master_files mf ON f.database_id=mf.database_id AND f.file_id=mf.file_id
    ORDER BY (f.io_stall_read_ms + f.io_stall_write_ms) DESC
    FOR JSON PATH)) AS file_io,
-  JSON_QUERY((SELECT DB_NAME(database_id) AS db_name, COUNT_BIG(*)*8/1024 AS buffer_mb
-   FROM sys.dm_os_buffer_descriptors WHERE database_id <> 32767
-   GROUP BY database_id ORDER BY COUNT_BIG(*) DESC
-   FOR JSON PATH)) AS buffer_pool,
-  JSON_QUERY((SELECT TOP 15 DB_NAME(mid.database_id) AS db_name,
-     OBJECT_SCHEMA_NAME(mid.object_id, mid.database_id) AS schema_name,
-     OBJECT_NAME(mid.object_id, mid.database_id) AS table_name,
-     migs.user_seeks + migs.user_scans AS user_impact_count,
-     CAST(migs.avg_total_user_cost*(migs.avg_user_impact/100.0)*(migs.user_seeks+migs.user_scans) AS BIGINT) AS improvement_score,
-     ISNULL(mid.equality_columns,'') AS eq_cols,
-     ISNULL(mid.inequality_columns,'') AS ineq_cols,
-     ISNULL(mid.included_columns,'') AS included_cols
-   FROM sys.dm_db_missing_index_groups mig
-   JOIN sys.dm_db_missing_index_group_stats migs ON mig.index_group_handle = migs.group_handle
-   JOIN sys.dm_db_missing_index_details mid ON mig.index_handle = mid.index_handle
-   WHERE mid.database_id > 4
-   ORDER BY improvement_score DESC
-   FOR JSON PATH)) AS missing_indexes,
   JSON_QUERY((SELECT TOP 20 s.session_id, s.login_name, s.host_name, s.program_name,
      r.status, r.command, r.wait_type, r.wait_time AS wait_ms, r.blocking_session_id AS blocked_by,
      DB_NAME(r.database_id) AS db_name,
@@ -528,28 +429,76 @@ SELECT
 FOR JSON PATH, WITHOUT_ARRAY_WRAPPER;
 `;
 
-// Separate Query Store batch - can be slow, fetched with own timeout, doesn't block main metrics
+function buildInventorySql(azureDb) {
+  const sections = {
+    databases: azureDb ? `SELECT DB_NAME() AS name, 'ONLINE' AS state, 'FULL' AS recovery,
+      (SELECT compatibility_level FROM sys.databases WHERE database_id=DB_ID()) AS compat,
+      CAST(SUM(CASE WHEN type=0 THEN size END)*8.0/1024 AS DECIMAL(18,1)) AS data_mb,
+      CAST(SUM(CASE WHEN type=1 THEN size END)*8.0/1024 AS DECIMAL(18,1)) AS log_mb,
+      NULL AS last_full_backup, NULL AS last_log_backup,
+      (SELECT CAST(actual_state AS INT) FROM sys.database_query_store_options) AS qs_on
+      FROM sys.database_files FOR JSON PATH, INCLUDE_NULL_VALUES`
+      : `SELECT d.name, d.state_desc AS state, d.recovery_model_desc AS recovery, d.compatibility_level AS compat,
+      CAST(SUM(CASE WHEN f.type=0 THEN f.size END)*8.0/1024 AS DECIMAL(18,1)) AS data_mb,
+      CAST(SUM(CASE WHEN f.type=1 THEN f.size END)*8.0/1024 AS DECIMAL(18,1)) AS log_mb,
+      CASE WHEN CAST(SERVERPROPERTY('EngineEdition') AS INT)=8 THEN NULL ELSE
+        (SELECT MAX(backup_finish_date) FROM msdb.dbo.backupset b WHERE b.database_name=d.name AND b.type='D') END AS last_full_backup,
+      CASE WHEN CAST(SERVERPROPERTY('EngineEdition') AS INT)=8 THEN NULL ELSE
+        (SELECT MAX(backup_finish_date) FROM msdb.dbo.backupset b WHERE b.database_name=d.name AND b.type='L') END AS last_log_backup,
+      CAST(d.is_query_store_on AS INT) AS qs_on
+      FROM sys.databases d JOIN sys.master_files f ON d.database_id=f.database_id
+      GROUP BY d.name,d.state_desc,d.recovery_model_desc,d.compatibility_level,d.is_query_store_on
+      ORDER BY d.name FOR JSON PATH, INCLUDE_NULL_VALUES`,
+    ...(azureDb ? {} : { buffer_pool: `SELECT DB_NAME(database_id) AS db_name,COUNT_BIG(*)*8/1024 AS buffer_mb
+      FROM sys.dm_os_buffer_descriptors WHERE database_id<>32767
+      GROUP BY database_id ORDER BY COUNT_BIG(*) DESC FOR JSON PATH` }),
+    missing_indexes: `SELECT TOP 15 ${azureDb ? 'DB_NAME()' : 'DB_NAME(mid.database_id)'} AS db_name,
+      OBJECT_SCHEMA_NAME(mid.object_id${azureDb ? '' : ',mid.database_id'}) AS schema_name,
+      OBJECT_NAME(mid.object_id${azureDb ? '' : ',mid.database_id'}) AS table_name,
+      migs.user_seeks+migs.user_scans AS user_impact_count,
+      CAST(migs.avg_total_user_cost*(migs.avg_user_impact/100.0)*(migs.user_seeks+migs.user_scans) AS BIGINT) AS improvement_score,
+      ISNULL(mid.equality_columns,'') AS eq_cols,ISNULL(mid.inequality_columns,'') AS ineq_cols,
+      ISNULL(mid.included_columns,'') AS included_cols
+      FROM sys.dm_db_missing_index_groups mig
+      JOIN sys.dm_db_missing_index_group_stats migs ON mig.index_group_handle=migs.group_handle
+      JOIN sys.dm_db_missing_index_details mid ON mig.index_handle=mid.index_handle
+      WHERE mid.database_id ${azureDb ? '=DB_ID()' : '>4'}
+      ORDER BY improvement_score DESC FOR JSON PATH`,
+  };
+  return `SET NOCOUNT ON; SET ANSI_WARNINGS ON;\n` +
+    Object.entries(sections).map(([name, sql]) => `DECLARE @${name} NVARCHAR(MAX),@${name}_error NVARCHAR(2048);
+      BEGIN TRY SET @${name}=(${sql}); END TRY
+      BEGIN CATCH SET @${name}_error=ERROR_MESSAGE(); END CATCH;`).join('\n') +
+    '\nSELECT ' + Object.keys(sections).map(name => `JSON_QUERY(@${name}) AS ${name},@${name}_error AS ${name}_error`).join(',') +
+    ' FOR JSON PATH,WITHOUT_ARRAY_WRAPPER;';
+}
+const INVENTORY_SQL = buildInventorySql(false);
+const INVENTORY_SQL_AZURE = buildInventorySql(true);
+
+// Query Store summaries use only intervals overlapping the most recent hour.
 const TOP_QUERIES_SQL = `
 SET NOCOUNT ON;
-SET ANSI_WARNINGS OFF;
+SET ANSI_WARNINGS ON;
 DECLARE @topqSql NVARCHAR(MAX)=N'';
 SELECT @topqSql = @topqSql + '
 UNION ALL
-SELECT TOP 8 '''+d.name+''' AS db_name, q.query_id, SUM(rs.count_executions) AS execs,
+SELECT * FROM (SELECT TOP 8 '''+REPLACE(d.name,'''','''''')+''' AS db_name, q.query_id, SUM(rs.count_executions) AS execs,
    CAST(SUM(rs.avg_cpu_time*rs.count_executions)/1000.0 AS DECIMAL(18,1)) AS total_cpu_ms,
-   CAST(AVG(rs.avg_cpu_time)/1000.0 AS DECIMAL(18,1)) AS avg_cpu_ms,
-   CAST(AVG(rs.avg_duration)/1000.0 AS DECIMAL(18,1)) AS avg_dur_ms,
-   CAST(AVG(rs.avg_logical_io_reads) AS BIGINT) AS avg_reads,
+   CAST(SUM(rs.avg_cpu_time*rs.count_executions)/NULLIF(SUM(rs.count_executions),0)/1000.0 AS DECIMAL(18,1)) AS avg_cpu_ms,
+   CAST(SUM(rs.avg_duration*rs.count_executions)/NULLIF(SUM(rs.count_executions),0)/1000.0 AS DECIMAL(18,1)) AS avg_dur_ms,
+   CAST(SUM(rs.avg_logical_io_reads*rs.count_executions)/NULLIF(SUM(rs.count_executions),0) AS BIGINT) AS avg_reads,
    MAX(rs.last_execution_time) AS last_exec,
    LEFT(REPLACE(REPLACE(qt.query_sql_text,CHAR(13),'' ''),CHAR(10),'' ''),300) AS query_text
-FROM ['+d.name+'].sys.query_store_query q
-JOIN ['+d.name+'].sys.query_store_query_text qt ON q.query_text_id=qt.query_text_id
-JOIN ['+d.name+'].sys.query_store_plan p ON p.query_id=q.query_id
-JOIN ['+d.name+'].sys.query_store_runtime_stats rs ON rs.plan_id=p.plan_id
+FROM '+QUOTENAME(d.name)+'.sys.query_store_query q
+JOIN '+QUOTENAME(d.name)+'.sys.query_store_query_text qt ON q.query_text_id=qt.query_text_id
+JOIN '+QUOTENAME(d.name)+'.sys.query_store_plan p ON p.query_id=q.query_id
+JOIN '+QUOTENAME(d.name)+'.sys.query_store_runtime_stats rs ON rs.plan_id=p.plan_id
+JOIN '+QUOTENAME(d.name)+'.sys.query_store_runtime_stats_interval ri ON ri.runtime_stats_interval_id=rs.runtime_stats_interval_id
+WHERE ri.end_time >= DATEADD(HOUR,-1,SYSUTCDATETIME())
 GROUP BY q.query_id, qt.query_sql_text
-ORDER BY total_cpu_ms DESC'
+ORDER BY total_cpu_ms DESC) AS dbq'+CAST(d.database_id AS NVARCHAR(12))
 FROM sys.databases d
-WHERE d.database_id > 4 AND d.state_desc='ONLINE' AND d.is_query_store_on=1;
+WHERE d.database_id > 4 AND d.state_desc='ONLINE' AND d.is_query_store_on=1 AND HAS_DBACCESS(d.name)=1;
 
 DECLARE @topq NVARCHAR(MAX) = N'[]';
 IF LEN(@topqSql) > 0
@@ -563,64 +512,72 @@ SELECT JSON_QUERY(@topq) AS top_queries FOR JSON PATH, WITHOUT_ARRAY_WRAPPER;
 `;
 
 // ---------- Collector ----------
-async function ensureSqlFile() {
-  const p = path.join(__dirname, '_metrics.sql');
-  await writeFile(p, MEGA_SQL, 'utf8');
-  const pa = path.join(__dirname, '_metrics_azure.sql');
-  await writeFile(pa, MEGA_SQL_AZURE, 'utf8');
-  const tp = path.join(__dirname, '_topqueries.sql');
-  await writeFile(tp, TOP_QUERIES_SQL, 'utf8');
-  return { megaPath: p, megaAzurePath: pa, topqPath: tp };
+const sqlProcessLimiter = createAsyncLimiter(2);
+const sectionCollector = createSectionCache();
+async function runSqlcmdOutput(cfg, sql, tag, extraArgs, timeoutMs, options = {}) {
+  throwIfConnectionAborted(options.signal);
+  validateConnectionConfig(cfg, { requireDatabase: false });
+  const directory = await mkdtemp(path.join(TMP_DIR, `${tag}-`));
+  const sqlFile = path.join(directory, 'query.sql');
+  const outFile = path.join(directory, 'result.out');
+  try {
+    await writeFile(sqlFile, sql, 'utf8');
+    return await sqlProcessLimiter(() => azureSqlAuth.withSession(cfg, async session => {
+      throwIfConnectionAborted(options.signal);
+      options.onProgress?.({ phase: 'connecting' });
+      const args = buildSqlcmdArgs(cfg, [...extraArgs, '-i', sqlFile, '-o', outFile]);
+      if (tag === 'test' || tag === 'engine') options.onProgress?.({ phase: tag === 'test' ? 'testing' : 'probing' });
+      const result = await new Promise((resolve, reject) => {
+        let child;
+        const aborted = () => { child?.kill?.(); };
+        child = execFile(pickSqlcmd(cfg), args, {
+          timeout: timeoutMs, windowsHide: true, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024,
+          env: sqlcmdEnvironment(cfg, process.env, session.tenant || cfg.tenant),
+        }, (error, stdout, stderr) => {
+          Promise.resolve().then(() => {
+            options.signal?.removeEventListener('abort', aborted);
+            if (options.signal?.aborted) reject(connectionAbortError(options.signal));
+            else resolve({ error, stdout, stderr });
+          });
+        });
+        options.signal?.addEventListener('abort', aborted, { once: true });
+        if (options.signal?.aborted) aborted();
+      });
+      throwIfConnectionAborted(options.signal);
+      let output = '';
+      try { output = await readFile(outFile, 'utf8'); }
+      catch (error) { if (error.code !== 'ENOENT' && !result.error) throw error; }
+      if (result.error) throw sqlcmdFailure(result.error, { ...result, output }, cfg, tag);
+      return output || result.stdout || '';
+    }, options));
+  } finally {
+    try { await rm(directory, { recursive: true, force: true }); }
+    catch (error) { console.error(`SQL scratch cleanup failed (${tag}): ${error.message}`); }
+  }
 }
-let sqlPaths = null;
 
 // Run a sqlcmd script, return parsed JSON (or throw).
 // For Entra Interactive auth, acquires an access token once (cached) so the
 // browser prompt only appears the first time — not on every collection.
-async function runSqlcmdJson(cfg, scriptPath, tag, timeoutSec) {
-  const outFile = path.join(TMP_DIR, `${tag}-${cfg.id}.out`);
-
-  if (cfg.auth === 'azuread-interactive') {
-    await ensureAzCliSession(cfg);
-  }
-  const useAzCli = cfg.auth === 'azuread-interactive';
-
-  const args = buildSqlcmdArgs(cfg, [
+async function runSqlcmdJson(cfg, sql, tag, timeoutSec, options = {}) {
+  const raw = await runSqlcmdOutput(cfg, sql, tag, [
     '-l', '10', '-t', String(timeoutSec),
     '-y', '0', '-Y', '0',
     '-w', '65535',
-    '-i', scriptPath, '-o', outFile,
-  ], { useAccessToken: useAzCli });
-
-  try {
-    await new Promise((resolve, reject) => {
-      execFile(pickSqlcmd(cfg), args, { timeout: (timeoutSec + 5) * 1000, windowsHide: true, encoding: 'utf8' },
-        (err, stdout, stderr) => {
-          if (err) return reject(new Error(`sqlcmd ${tag} failed: ${err.message}\nSTDERR: ${(stderr||'').slice(0,400)}`));
-          resolve();
-        });
-    });
-  } catch (e) {
-    // If Az CLI session died, next call will re-run az login
-    if (useAzCli && /authenticat|token|login/i.test(e.message)) azLoginLock.delete(cfg.id);
-    throw e;
-  }
-
-  const raw = await readFile(outFile, 'utf8');
+  ], (timeoutSec + 15) * 1000, options);
   const firstBrace = Math.min(...[raw.indexOf('{'), raw.indexOf('[')].filter(i => i >= 0));
-  if (firstBrace < 0) throw new Error(`sqlcmd ${tag} returned no JSON: ${raw.slice(0,200)}`);
+  if (!Number.isFinite(firstBrace)) throw new Error(`sqlcmd ${tag} returned no JSON: ${redactSqlDiagnostic(raw, cfg).slice(0, 200)}`);
   let trimmed = raw.slice(firstBrace).trim();
   const strippedOnce = trimmed.replace(/\r?\n/g, '');
   try {
     return JSON.parse(trimmed);
   } catch (e) {
     try { return JSON.parse(strippedOnce); }
-    catch (e2) { throw new Error(`Parse ${tag} failed: ${e.message}\nFirst 300: ${trimmed.slice(0,300)}`); }
+    catch (e2) { throw new Error(`Parse ${tag} failed: ${redactSqlDiagnostic(trimmed, cfg).slice(0, 300)}`); }
   }
 }
 
 async function collectFor(cfg) {
-  if (!sqlPaths) sqlPaths = await ensureSqlFile();
   const started = Date.now();
 
   // If engineEdition unknown, probe now so we route to the right batch.
@@ -628,130 +585,200 @@ async function collectFor(cfg) {
     try {
       const edition = await probeEngineEdition(cfg);
       cfg.engineEdition = edition;
-      // Persist so we don't re-probe every collection
-      const list = await loadServers();
-      const idx = list.findIndex(s => s.id === cfg.id);
-      if (idx >= 0) { list[idx].engineEdition = edition; await saveServers(list); }
     } catch (e) { /* fall back to hostname sniffing */ }
   }
 
-  const useAzureDbBatch = isAzureSqlDb(cfg) || (!cfg.engineEdition && isAzureDbLike(cfg));
-  const engineLabel = isAzureSqlDb(cfg) ? 'azure-sqldb'
-                    : isAzureManagedInstance(cfg) ? 'azure-mi'
-                    : useAzureDbBatch ? 'azure-sqldb'
-                    : 'onprem';
-
-  let mainData, topqData;
-  if (useAzureDbBatch) {
-    mainData = await runSqlcmdJson(cfg, sqlPaths.megaAzurePath, 'metrics-azure', 45);
-    topqData = { top_queries: mainData.top_queries || [] };
-  } else {
-    // On-prem AND Azure SQL Managed Instance share the same DMV surface
-    [mainData, topqData] = await Promise.all([
-      runSqlcmdJson(cfg, sqlPaths.megaPath, 'metrics', 45),
-      runSqlcmdJson(cfg, sqlPaths.topqPath, 'topq', 45).catch(err => {
-        console.error(`Top queries failed for ${cfg.id}: ${err.message}`);
-        return { top_queries: [] };
-      }),
-    ]);
-  }
-
+  const useAzureDbBatch = isAzureDbLike(cfg);
+  const mainData = await runSqlcmdJson(cfg, useAzureDbBatch ? MEGA_SQL_AZURE : MEGA_SQL, useAzureDbBatch ? 'metrics-azure' : 'metrics', 30);
+  // Confirm edition from the main sample as well as the connection probe.
+  if (mainData.instance?.engine_edition) cfg.engineEdition = Number(mainData.instance.engine_edition);
   const data = { ...mainData };
-  data.top_queries = topqData.top_queries || mainData.top_queries || [];
-  data.generated_at = new Date().toISOString();
-  data.collect_ms = Date.now() - started;
+  data.sectionMetadata = {};
+  const inventory = await sectionCollector.get(cfg, 'inventory', 300000, async previous => {
+    const result = await runSqlcmdJson(cfg, useAzureDbBatch ? INVENTORY_SQL_AZURE : INVENTORY_SQL, 'inventory', 30);
+    result.sectionSamples = {};
+    for (const name of ['databases', 'buffer_pool', 'missing_indexes']) {
+      if (result[`${name}_error`]) {
+        result[name] = previous?.[name] ?? null;
+        result.sectionSamples[name] = previous?.sectionSamples?.[name] ?? null;
+      } else result.sectionSamples[name] = new Date().toISOString();
+    }
+    return result;
+  });
+  for (const name of ['databases', 'buffer_pool', 'missing_indexes']) {
+    const applicable = !(useAzureDbBatch && name === 'buffer_pool');
+    const error = inventory.error || inventory.data?.[`${name}_error`];
+    if (applicable) data[name] = inventory.data?.[name] ?? null;
+    else data[name] = null;
+    data.sectionMetadata[name] = {
+      sampledAt: applicable ? inventory.data?.sectionSamples?.[name] ?? null : null,
+      stale: !!error, intervalSeconds: 300, applicable,
+      ...(error ? { error: redactSqlDiagnostic(error.message || String(error), cfg).slice(0, 300) } : {}),
+    };
+  }
+  const queries = await sectionCollector.get(cfg, 'top_queries', 120000, () =>
+    runSqlcmdJson(cfg, useAzureDbBatch ? TOP_QUERIES_SQL_AZURE : TOP_QUERIES_SQL, 'topq', 30));
+  data.top_queries = queries.data?.top_queries ?? null;
+  data.sectionMetadata.top_queries = {
+    sampledAt: queries.sampledAt != null ? new Date(queries.sampledAt).toISOString() : null,
+    stale: !!queries.error, intervalSeconds: 120, lookbackHours: 1,
+    ...(queries.error ? { error: redactSqlDiagnostic(queries.error.message, cfg).slice(0, 300) } : {}),
+  };
   data.server_id = cfg.id;
   data.server_name_config = cfg.name;
-  data.engine = engineLabel;
+  data.engine = isAzureSqlDb(cfg) ? 'azure-sqldb' : isAzureManagedInstance(cfg) ? 'azure-mi' : 'onprem';
   data.engine_edition = cfg.engineEdition;
-  data.databases ??= [];
   data.waits ??= [];
   data.file_io ??= [];
-  data.missing_indexes ??= [];
   data.active ??= [];
   data.latches ??= [];
   data.blocking ??= [];
   data.waiters ??= [];
   data.instance ??= {};
-  if (data.buffer_pool === undefined) data.buffer_pool = [];
   if (data.tempdb === undefined || (useAzureDbBatch && (!data.tempdb || Object.keys(data.tempdb).length === 0))) {
     data.tempdb = useAzureDbBatch ? null : {};
   }
 
-  // Custom counters (run after main metrics so we don't slow down the first paint)
-  data.custom_counters = await runAllCounters(cfg);
-
-  // Append to history ring buffer (async, doesn't block response)
-  appendHistory(cfg.id, data).catch(() => {});
-
+  // Include ancillary/counter time in the reported end-to-end collection cost.
+  try { data.custom_counters = await runAllCounters(cfg); }
+  catch (error) {
+    data.custom_counters = null;
+    data.sectionMetadata.custom_counters = {
+      sampledAt: null, stale: true, error: 'Counter configuration is invalid; review saved counters.',
+    };
+  }
+  data.generated_at = new Date().toISOString();
+  data.collect_ms = Date.now() - started;
   return data;
 }
 
-async function probeEngineEdition(cfg) {
-  if (cfg.auth === 'azuread-interactive') await ensureAzCliSession(cfg);
-  const useAzCli = cfg.auth === 'azuread-interactive';
-  const args = buildSqlcmdArgs(cfg, ['-l','10','-t','15','-h','-1','-W','-Q','SELECT CAST(SERVERPROPERTY(\'EngineEdition\') AS INT) AS e'], { useAccessToken: useAzCli });
-  return new Promise((resolve, reject) => {
-    execFile(pickSqlcmd(cfg), args, { timeout: 20000, windowsHide: true, encoding: 'utf8' },
-      (err, stdout) => {
-        if (err) return reject(err);
-        const m = stdout.match(/(\d+)/);
-        resolve(m ? Number(m[1]) : null);
-      });
-  });
+async function probeEngineEdition(cfg, options = {}) {
+  const raw = await runSqlcmdOutput(cfg,
+    "SET NOCOUNT ON; SELECT CAST(SERVERPROPERTY('EngineEdition') AS INT);",
+    'engine', ['-l', '10', '-t', '15', '-h', '-1', '-W'], 30000, options);
+  throwIfConnectionAborted(options.signal);
+  const value = raw.trim();
+  if (!/^\d+$/.test(value) || ![1, 2, 3, 4, 5, 6, 8, 9, 11, 12].includes(Number(value))) {
+    throw new Error('Engine probe returned no recognized SERVERPROPERTY EngineEdition');
+  }
+  return Number(value);
 }
 
-async function testConnection(cfg) {
-  if (cfg.auth === 'azuread-interactive') {
-    try { await ensureAzCliSession(cfg); }
-    catch (e) { return { ok: false, error: 'Azure CLI login failed: ' + e.message.slice(0,400) }; }
+async function testConnection(cfg, options = {}) {
+  try {
+    validateConnectionConfig(cfg);
+    const raw = await runSqlcmdOutput(cfg, 'SET NOCOUNT ON; SELECT 1;',
+      'test', ['-l', '10', '-t', '15', '-h', '-1', '-W'], 30000, { ...options, allowLogin: true });
+    throwIfConnectionAborted(options.signal);
+    if (raw.trim() !== '1') throw new Error('Connection test did not return the expected SQL result');
+    return { ok: true };
+  } catch (error) {
+    if (error.code === 'PROCESS_CLEANUP_FAILED') throw error;
+    throwIfConnectionAborted(options.signal);
+    return { ok: false, error: redactSqlDiagnostic(error.message, cfg) };
   }
-  const useAzCli = cfg.auth === 'azuread-interactive';
-  const args = buildSqlcmdArgs(cfg, [
-    '-l', '60', '-t', '60',
-    '-h', '-1',
-    '-Q', 'SELECT 1',
-  ], { useAccessToken: useAzCli });
-  return new Promise((resolve) => {
-    execFile(pickSqlcmd(cfg), args, { timeout: 30000, windowsHide: true, encoding: 'utf8' },
-      (err, stdout, stderr) => {
-        if (err) {
-          const parts = [];
-          if (stderr && stderr.trim()) parts.push('STDERR: ' + stderr.trim());
-          if (stdout && stdout.trim()) parts.push('STDOUT: ' + stdout.trim());
-          if (err.killed) parts.push('(process timed out)');
-          if (parts.length === 0) parts.push(err.message);
-          resolve({ ok: false, error: parts.join(' | ').slice(0, 900) });
-        } else resolve({ ok: true });
-      });
-  });
 }
 
 // ---------- Cache per server ----------
-const cache = new Map(); // serverId -> { at, data }
-const CACHE_MS = 4000;
+const CACHE_MS = 30000;
+const metricsCollector = createCollectorCache(async stored => {
+  const current = findServer(await loadServers(), stored.id);
+  if (configIdentity(current) !== configIdentity(stored)) throw requestError(409, 'Server configuration changed; refresh and retry');
+  if (current.monitoringPaused) throw Object.assign(requestError(409, 'Monitoring is paused for this server'), { monitoringPaused: true });
+  const cfg = await resolveServer(current);
+  // A queued collection may have been paused while credentials were resolved.
+  if (findServer(await loadServers(), stored.id).monitoringPaused) {
+    throw Object.assign(requestError(409, 'Monitoring is paused for this server'), { monitoringPaused: true });
+  }
+  const data = await collectFor(cfg);
+  // Re-read under the registry lock; never save a collection's old snapshot.
+  const persistEdition = cfg.engineEdition && cfg.engineEdition !== current.engineEdition;
+  const verifyCurrent = list => {
+    const latest = findServer(list, stored.id);
+    if (configIdentity(latest) !== configIdentity(stored)) throw requestError(409, 'Server configuration changed during collection');
+    if (persistEdition && connectionIdentity(latest) === connectionIdentity(stored)) latest.engineEdition = cfg.engineEdition;
+  };
+  if (persistEdition) await updateServers(verifyCurrent);
+  else verifyCurrent(await loadServers());
+  appendHistory(cfg.id, data).catch(error => console.error(`History save failed for ${cfg.id}: ${error.message}`));
+  return data;
+}, { defaultMaxAgeMs: CACHE_MS });
+
+async function getMetricsFor(cfgStored, maxAgeMs = CACHE_MS) {
+  const current = findServer(await loadServers(), cfgStored.id);
+  if (configIdentity(current) !== configIdentity(cfgStored)) throw requestError(409, 'Server configuration changed; refresh and retry');
+  if (current.monitoringPaused) {
+    const cached = metricsCollector.peek(current);
+    if (!cached?.data) throw Object.assign(requestError(409, 'Monitoring is paused; no cached sample is available'), { monitoringPaused: true });
+    return { ...cached.data, monitoringPaused: true };
+  }
+  const data = await metricsCollector.get(current, maxAgeMs);
+  const latest = findServer(await loadServers(), current.id);
+  if (configIdentity(latest) !== configIdentity(current)) throw requestError(409, 'Server configuration changed during collection');
+  if (metricsCollector.peek(latest)?.data === data) monitor.acceptSample(latest, data);
+  return latest.monitoringPaused ? { ...data, monitoringPaused: true } : data;
+}
+function invalidateMetrics(id) {
+  metricsCollector.invalidate(id);
+  sectionCollector.invalidate(id);
+  counterRunner.invalidate(id);
+  monitor.invalidate(id);
+}
+
+// Fleet monitoring is opt-in at rest; active overview requests renew a finite viewing lease.
+let emailMonitoringEnabled = false;
+const microsoftEmailAuth = createMicrosoftEmailAuth({
+  settingsFile: path.join(DATA_DIR, 'microsoft-email-auth.json'),
+  encryptSecret: encryptPassword, decryptSecret: decryptPassword,
+});
+const emailAlerts = createAlertService({
+  settingsFile: path.join(DATA_DIR, 'alert-settings.json'),
+  stateFile: path.join(DATA_DIR, 'alert-state.json'),
+  encryptSecret: encryptPassword, decryptSecret: decryptPassword,
+  microsoftAuth: microsoftEmailAuth,
+  findServer: async id => (await loadServers()).find(server => server.id === id),
+  onDeliveryWarning: status => console.error(`Email delivery: ${status.message}`),
+});
+async function observeEmail(server, data, options) {
+  if (!emailMonitoringEnabled) return;
+  try {
+    const latest = (await loadServers()).find(item => item.id === server.id);
+    if (!latest || latest.monitoringPaused || options?.error?.monitoringPaused) return;
+    await emailAlerts.observe(latest, data, options);
+  } catch {
+    console.error('Email monitoring failed to process a sample; review Email alerts settings.');
+  }
+}
+const monitor = createMonitorScheduler({
+  loadServers, collect: getMetricsFor, health: computeHealth,
+  onSample: (server, data) => observeEmail(server, data),
+  onError: (server, error) => observeEmail(server, null, { error }),
+});
+function configureEmailMonitoring(settings) {
+  emailMonitoringEnabled = settings.enabled;
+  monitor.configure({ enabled: settings.enabled, intervalSeconds: settings.intervalSeconds });
+  return settings;
+}
 
 // ==============================
 // History ring buffer (per server, JSON on disk under history/)
 // Keeps last MAX_HISTORY samples (default 720 = 6 hours @ 30s)
 // ==============================
-const HISTORY_DIR = path.join(__dirname, 'history');
+const HISTORY_DIR = path.join(DATA_DIR, 'history');
 await mkdir(HISTORY_DIR, { recursive: true });
 const MAX_HISTORY = 720;
-const historyBuffers = new Map(); // serverId -> array
-
-async function loadHistory(id) {
-  if (historyBuffers.has(id)) return historyBuffers.get(id);
-  try {
-    const raw = await readFile(path.join(HISTORY_DIR, `${id}.json`), 'utf8');
-    const arr = JSON.parse(raw);
-    historyBuffers.set(id, Array.isArray(arr) ? arr.slice(-MAX_HISTORY) : []);
-  } catch { historyBuffers.set(id, []); }
-  return historyBuffers.get(id);
+const historyStores = new Map();
+function historyStore(id) {
+  if (!/^[A-Za-z0-9_-]+$/.test(id)) throw requestError(400, 'invalid serverId');
+  if (!historyStores.has(id)) {
+    historyStores.set(id, createJsonStore(path.join(HISTORY_DIR, `${id}.json`), () => [], value => {
+      if (!Array.isArray(value)) throw new Error('History must be an array');
+    }));
+  }
+  return historyStores.get(id);
 }
-async function saveHistory(id) {
-  const arr = historyBuffers.get(id) || [];
-  await writeFile(path.join(HISTORY_DIR, `${id}.json`), JSON.stringify(arr));
+async function loadHistory(id) {
+  return (await historyStore(id).read()).slice(-MAX_HISTORY);
 }
 function extractHistorySample(data) {
   const i = data.instance || {};
@@ -760,7 +787,7 @@ function extractHistorySample(data) {
   const totalWait = waits.reduce((s,w)=>s + (Number(w.wait_time_s)||0), 0);
   const totalSignal = waits.reduce((s,w)=>s + (Number(w.signal_wait_s)||0), 0);
   const sample = {
-    t: Date.now(),
+    t: Number.isFinite(Date.parse(data.generated_at)) ? Date.parse(data.generated_at) : Date.now(),
     ple: i.page_life_expectancy ?? null,
     bhr: Number(bhr.toFixed(2)),
     memMb: i.memory_in_use_mb ?? null,
@@ -783,80 +810,48 @@ function extractHistorySample(data) {
   return sample;
 }
 async function appendHistory(id, data) {
-  const arr = await loadHistory(id);
-  arr.push(extractHistorySample(data));
-  if (arr.length > MAX_HISTORY) arr.splice(0, arr.length - MAX_HISTORY);
-  historyBuffers.set(id, arr);
-  // Fire-and-forget disk write; failures shouldn't block metrics
-  saveHistory(id).catch(() => {});
+  await historyStore(id).update(arr => {
+    arr.push(extractHistorySample(data));
+    if (arr.length > MAX_HISTORY) arr.splice(0, arr.length - MAX_HISTORY);
+  });
 }
 
 // ==============================
 // Custom counters
-// User-defined T-SQL that returns a single scalar value per collection.
-// Guarded by a keyword denylist (read-only only).
+// Enabled, numeric read-only counters have an independent bounded cadence.
 // ==============================
-const CUSTOM_COUNTER_DENYLIST = /\b(INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|EXEC|EXECUTE|TRUNCATE|MERGE|GRANT|REVOKE|BACKUP|RESTORE|RECONFIGURE|SHUTDOWN|WAITFOR|OPENROWSET|OPENDATASOURCE|xp_)\b/i;
-function validateCounterSql(sql) {
-  if (!sql || sql.length > 8000) throw new Error('SQL is empty or too long (>8000 chars)');
-  if (CUSTOM_COUNTER_DENYLIST.test(sql)) throw new Error('SQL contains blocked keyword (write/DDL/exec statements are not allowed)');
-  // Must contain SELECT
-  if (!/\bSELECT\b/i.test(sql)) throw new Error('SQL must contain a SELECT statement');
-  return true;
-}
-
-async function runCustomCounter(cfg, counter) {
-  validateCounterSql(counter.sql);
-  const outFile = path.join(TMP_DIR, `cc-${cfg.id}-${counter.id}.out`);
-  const sqlFile = path.join(TMP_DIR, `cc-${cfg.id}-${counter.id}.sql`);
-  // Wrap user SQL to guarantee a scalar (first column of first row).
-  // We add a leading SET NOCOUNT ON and SET ANSI_WARNINGS OFF.
-  const wrapped = `SET NOCOUNT ON;
-SET ANSI_WARNINGS OFF;
-${counter.sql}`;
-  await writeFile(sqlFile, wrapped, 'utf8');
-  if (cfg.auth === 'azuread-interactive') await ensureAzCliSession(cfg);
-  const useAzCli = cfg.auth === 'azuread-interactive';
-  const args = buildSqlcmdArgs(cfg, ['-l','5','-t','8','-h','-1','-w','8000','-i',sqlFile,'-o',outFile], { useAccessToken: useAzCli });
-  await new Promise((resolve, reject) => {
-    execFile(pickSqlcmd(cfg), args, { timeout: 12000, windowsHide: true, encoding: 'utf8' },
-      (err, stdout, stderr) => err ? reject(new Error((stderr||err.message).slice(0,300))) : resolve());
-  });
-  const raw = (await readFile(outFile, 'utf8')).trim();
-  if (!raw) return { value: null };
-  // Take first non-empty line, first "column" (whitespace/tab separated)
-  const firstLine = raw.split(/\r?\n/).find(l => l.trim().length > 0) || '';
-  const firstCol = firstLine.split(/\s{2,}|\t/)[0].trim();
-  const num = Number(firstCol);
-  return { value: Number.isFinite(num) ? num : firstCol };
-}
-
-async function runAllCounters(cfg) {
-  const counters = cfg.customCounters || [];
-  if (counters.length === 0) return [];
-  const results = await Promise.all(counters.map(c =>
-    runCustomCounter(cfg, c).catch(e => ({ error: e.message.slice(0, 200) }))
-  ));
-  return counters.map((c, i) => ({
-    id: c.id, name: c.name, unit: c.unit || '',
-    warnGt: c.warnGt, critGt: c.critGt, warnLt: c.warnLt, critLt: c.critLt,
-    description: c.description || '',
-    ...results[i],
-  }));
+const counterRunner = createCounterRunner({
+  execute: (cfg, sql, options) => runSqlcmdOutput(cfg, `SET NOCOUNT ON;
+SET ANSI_WARNINGS ON;
+${sql}`, 'cc', ['-l', '5', '-t', '8', '-h', '-1', '-w', '8000'], 12000, options),
+});
+function runAllCounters(cfg) {
+  return counterRunner.collect(cfg);
 }
 
 // ---------- HTTP request body parser ----------
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let body = '';
+    let bytes = 0;
     req.setEncoding('utf8');
-    req.on('data', c => body += c);
-    req.on('end', () => { try { resolve(body ? JSON.parse(body) : {}); } catch (e) { reject(e); } });
+    req.on('data', c => {
+      bytes += Buffer.byteLength(c);
+      if (bytes > 1024 * 1024) reject(requestError(413, 'Request body exceeds 1 MB'));
+      else body += c;
+    });
+    req.on('end', () => {
+      if (bytes > 1024 * 1024) return;
+      try { resolve(body ? JSON.parse(body) : {}); }
+      catch { reject(requestError(400, 'Invalid JSON request body')); }
+    });
+    req.on('aborted', () => reject(requestError(400, 'Request was aborted')));
     req.on('error', reject);
   });
 }
 
 function json(res, code, obj) {
+  if (res.destroyed || res.writableEnded) return;
   res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
   res.end(JSON.stringify(obj));
 }
@@ -864,45 +859,18 @@ function json(res, code, obj) {
 // Public view of a server (never leaks password or ciphertext)
 function publicView(cfg) {
   const { password, passwordEnc, ...rest } = cfg;
-  return { ...rest, hasPassword: !!(password || passwordEnc) };
+  return { connectionType: 'auto', tenant: '', ...rest, monitoringPaused: cfg.monitoringPaused === true, entraFlow: cfg.entraFlow ?? 'browser', hasPassword: !!(password || passwordEnc) };
 }
 
 // ==============================
-// Ollama proxy for "Ask AI" feature
+// Configurable answer-only AI providers
 // ==============================
 const OLLAMA_URL = process.env.OLLAMA_URL || 'http://localhost:11434';
-async function ollamaListModels() {
-  const r = await fetch(OLLAMA_URL + '/api/tags');
-  if (!r.ok) throw new Error('Ollama tags HTTP ' + r.status);
-  const j = await r.json();
-  // Exclude embedding-only models
-  return (j.models || []).map(m => m.name).filter(n => !n.includes('embed'));
-}
-async function ollamaChat({ model, system, user, timeoutMs = 180000 }) {
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), timeoutMs);
-  try {
-    const r = await fetch(OLLAMA_URL + '/api/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model, stream: false,
-        messages: [
-          { role: 'system', content: system },
-          { role: 'user', content: user },
-        ],
-        options: { temperature: 0.2, num_ctx: 8192 },
-      }),
-      signal: ctrl.signal,
-    });
-    if (!r.ok) {
-      const txt = await r.text();
-      throw new Error('Ollama HTTP ' + r.status + ': ' + txt.slice(0, 300));
-    }
-    const j = await r.json();
-    return j.message?.content || '';
-  } finally { clearTimeout(t); }
-}
+const ai = createAiProviders({
+  settingsFile: path.join(DATA_DIR, 'ai-settings.json'),
+  encryptSecret: encryptPassword, decryptSecret: decryptPassword, ollamaUrl: OLLAMA_URL,
+  workingDirectory: __dirname,
+});
 function buildAiContext(data, history) {
   // Compact context: instance summary + top waits + top queries + custom counter values
   const i = data.instance || {};
@@ -910,20 +878,26 @@ function buildAiContext(data, history) {
     type: w.wait_type,
     wait_s: Math.round(Number(w.wait_time_s) || 0),
     signal_s: Math.round(Number(w.signal_wait_s) || 0),
-    count: Number(w.waiting_tasks_count) || 0,
+    count: Number(w.tasks ?? w.waiting_tasks_count) || 0,
   }));
   const topq = (data.top_queries || []).slice(0, 8).map(q => ({
-    db: q.db_name, qid: q.query_id, execs: q.execution_count,
-    avg_cpu_ms: q.avg_cpu_ms, avg_dur_ms: q.avg_duration_ms, avg_reads: q.avg_logical_reads,
+    db: q.db_name, qid: q.query_id, execs: q.execs,
+    avg_cpu_ms: q.avg_cpu_ms, avg_dur_ms: q.avg_dur_ms, avg_reads: q.avg_reads,
     text: (q.query_text || '').slice(0, 400),
   }));
   const missing = (data.missing_indexes || []).slice(0, 5);
   const files = (data.file_io || []).slice(0, 8);
-  const custom = (data.custom_counters || []).map(c => ({ name: c.name, value: c.value, unit: c.unit || '' }));
+  const custom = (data.custom_counters || []).map(c => ({
+    id: c.id, name: c.name, value: c.value, unit: c.unit || '',
+    enabled: c.enabled, status: c.status, cached: c.cached, stale: c.stale,
+    error: c.error, collectedAt: c.collectedAt, attemptedAt: c.attemptedAt, intervalSeconds: c.intervalSeconds,
+  }));
   const recent = (history || []).slice(-30);
   return {
     engine: data.engine,
     engine_edition: data.engine_edition,
+    generated_at: data.generated_at,
+    sectionMetadata: data.sectionMetadata || {},
     instance: {
       uptime_min: i.uptime_min, cpu_count: i.cpu_count,
       user_sessions: i.user_sessions, active_requests: i.active_requests, blocked_requests: i.blocked_requests,
@@ -941,12 +915,54 @@ function buildAiContext(data, history) {
     recent_history_last_30: recent,
   };
 }
+const aiPreviews = createAiPreviewStore({
+  ai,
+  findServer: async id => (await loadServers()).find(s => s.id === id),
+  getMetrics: stored => getMetricsFor(stored, 60000),
+  getSnapshot: (stored, sampledAt) => metricsCollector.snapshot(stored, sampledAt),
+  loadHistory, buildContext: buildAiContext,
+});
+const assets = new Map([
+  ['/health.js', ['health.js', 'text/javascript; charset=utf-8']],
+  ['/counters-ui.js', ['counters-ui.js', 'text/javascript; charset=utf-8']],
+  ['/counters-ui.css', ['counters-ui.css', 'text/css; charset=utf-8']],
+  ['/counter-templates.js', ['counter-templates.js', 'text/javascript; charset=utf-8']],
+  ['/alerts-ui.js', ['alerts-ui.js', 'text/javascript; charset=utf-8']],
+  ['/alerts-ui.css', ['alerts-ui.css', 'text/css; charset=utf-8']],
+  ['/connection-request.js', ['connection-request.js', 'text/javascript; charset=utf-8']],
+  ['/microsoft-device-signin.js', ['microsoft-device-signin.js', 'text/javascript; charset=utf-8']],
+  ['/copy-signin-code.js', ['copy-signin-code.js', 'text/javascript; charset=utf-8']],
+  ['/sql-endpoint.js', ['sql-endpoint.js', 'text/javascript; charset=utf-8']],
+  ['/fleet-ui.js', ['fleet-ui.js', 'text/javascript; charset=utf-8']],
+  ['/fleet-ui.css', ['fleet-ui.css', 'text/css; charset=utf-8']],
+  ['/ai-ui.js', ['ai-ui.js', 'text/javascript; charset=utf-8']],
+  ['/ai-ui.css', ['ai-ui.css', 'text/css; charset=utf-8']],
+  ['/disclaimer-ui.js', ['disclaimer-ui.js', 'text/javascript; charset=utf-8']],
+  ['/favicon.ico', ['sql-dashboard-app.ico', 'image/x-icon']],
+  ['/sql-dashboard-logo.png', ['sql-dashboard-logo.png', 'image/png']],
+]);
 
 // ---------- HTTP server ----------
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, 'http://x');
     const p = url.pathname;
+    const allowedHosts = new Set(['127.0.0.1', 'localhost', 'sql-dashboard']);
+    let requestHost;
+    try { requestHost = new URL(`http://${req.headers.host || ''}`); }
+    catch { throw requestError(403, 'Invalid dashboard host'); }
+    if (!allowedHosts.has(requestHost.hostname) || Number(requestHost.port || 80) !== server.address().port) {
+      throw requestError(403, 'Invalid dashboard host');
+    }
+    if (!['GET', 'HEAD'].includes(req.method) && req.headers.origin
+      && req.headers.origin !== requestHost.origin) throw requestError(403, 'Cross-origin requests are not allowed');
+
+    if (assets.has(p) && req.method === 'GET') {
+      const [file, contentType] = assets.get(p);
+      res.writeHead(200, { 'Content-Type': contentType, 'Cache-Control': 'no-cache' });
+      res.end(await readFile(path.join(__dirname, file)));
+      return;
+    }
 
     if (p === '/' || p === '/index.html') {
       const html = await readFile(HTML, 'utf8');
@@ -959,50 +975,135 @@ const server = http.createServer(async (req, res) => {
       const list = await loadServers();
       return json(res, 200, list.map(publicView));
     }
+    if (p.startsWith('/api/alerts/')) {
+      if (req.method === 'POST' && !/^application\/json(?:;|$)/i.test(req.headers['content-type'] || '')) {
+        throw requestError(415, 'Email settings requests require application/json');
+      }
+      if (p === '/api/alerts/microsoft/settings' && req.method === 'GET') return json(res, 200, await microsoftEmailAuth.settings());
+      if (p === '/api/alerts/microsoft/login-status' && req.method === 'GET') {
+        return json(res, 200, await microsoftEmailAuth.loginStatus(url.searchParams.get('operationId') || undefined));
+      }
+      if (p === '/api/alerts/microsoft/login' && req.method === 'POST') {
+        return json(res, 200, await microsoftEmailAuth.startLogin(await readBody(req)));
+      }
+      if (p === '/api/alerts/microsoft/cancel' && req.method === 'POST') {
+        return json(res, 200, await microsoftEmailAuth.cancelLogin(await readBody(req)));
+      }
+      if (p === '/api/alerts/settings' && req.method === 'GET') return json(res, 200, await emailAlerts.settings());
+      if (p === '/api/alerts/settings' && req.method === 'POST') {
+        return json(res, 200, configureEmailMonitoring(await emailAlerts.saveSettings(await readBody(req))));
+      }
+      if (p === '/api/alerts/settings-preview' && req.method === 'POST') {
+        return json(res, 200, await emailAlerts.prepareSettingsPreview(await readBody(req)));
+      }
+      if (p === '/api/alerts/settings-apply' && req.method === 'POST') {
+        return json(res, 200, configureEmailMonitoring(await emailAlerts.applySettings(await readBody(req))));
+      }
+      if (p === '/api/alerts/test-preview' && req.method === 'POST') {
+        return json(res, 200, await emailAlerts.prepareTestPreview(await readBody(req)));
+      }
+      if (p === '/api/alerts/test' && req.method === 'POST') {
+        const result = await emailAlerts.sendTest(await readBody(req));
+        return json(res, result.ok ? 200 : 502, result);
+      }
+    }
+    if (p === '/api/overview' && req.method === 'GET') {
+      monitor.requestRefresh(undefined, { viewing: true, force: url.searchParams.get('refresh') === '1' });
+      return json(res, 200, await monitor.snapshot());
+    }
+    const monitoringRoute = p.match(/^\/api\/servers\/([A-Za-z0-9_-]+)\/monitoring$/);
+    if (monitoringRoute && req.method === 'PATCH') {
+      if (!/^application\/json(?:;|$)/i.test(req.headers['content-type'] || '')) {
+        throw requestError(415, 'Monitoring requests require application/json');
+      }
+      const body = await readBody(req);
+      if (!body || Array.isArray(body) || typeof body.monitoringPaused !== 'boolean' ||
+          Object.keys(body).some(key => key !== 'monitoringPaused')) {
+        throw requestError(400, 'monitoringPaused must be a boolean and the only field');
+      }
+      const id = monitoringRoute[1];
+      let updated;
+      await updateServers(list => {
+        updated = findServer(list, id);
+        updated.monitoringPaused = body.monitoringPaused;
+      });
+      // Reconcile pause state without invalidating the last sample or connection.
+      const overview = await monitor.snapshot();
+      if (!updated.monitoringPaused) await monitor.requestRefresh([id], { force: true });
+      return json(res, 200, {
+        ...publicView(updated),
+        collecting: overview.servers.find(server => server.id === id)?.collecting === true,
+      });
+    }
+    if (p === '/api/connection-progress' && req.method === 'GET') {
+      return json(res, 200, connectionProgress.get(url.searchParams.get('operationId')));
+    }
+    if (p === '/api/connection-cancel' && req.method === 'POST') {
+      const body = await readBody(req);
+      const progress = connectionProgress.cancel(body?.operationId);
+      return json(res, progress.state === 'cancelling' ? 202 : 200, progress);
+    }
 
     if (p === '/api/list-databases' && req.method === 'POST') {
       // Probe an ad-hoc server (unsaved) to list databases visible to the login.
       // Used by the Add/Edit modal to fill the Database dropdown.
       const body = await readBody(req);
-      if (!body.server || !body.auth) return json(res, 400, { error: 'server and auth required' });
+      if (!body || typeof body !== 'object' || Array.isArray(body)) throw requestError(400, 'Invalid connection request');
+      return await connectionProgress.run(body.operationId, req, res, async context => {
+      const stored = body.serverId ? findServer(await loadServers(), body.serverId) : {};
       const cfg = {
+        ...stored,
         id: 'probe-' + crypto.randomBytes(2).toString('hex'),
-        server: body.server, auth: body.auth,
-        user: body.user || '', password: body.password || '',
-        database: '',   // Master default is fine here; Azure SQL will refuse if no access
-        encrypt: body.encrypt !== false,
-        trustCert: body.trustCert !== false,
+        server: body.server ?? stored.server, auth: body.auth ?? stored.auth,
+        user: body.user ?? stored.user ?? '', password: body.clearPassword ? '' : (body.password ?? ''),
+        database: body.database ?? stored.database ?? '',
+        connectionType: body.connectionType ?? stored.connectionType ?? 'auto',
+        tenant: body.tenant ?? stored.tenant ?? '',
+        entraFlow: body.entraFlow ?? stored.entraFlow ?? 'browser',
+        encrypt: body.encrypt ?? stored.encrypt ?? true,
+        trustCert: body.trustCert ?? stored.trustCert ?? true,
       };
-      // For Azure SQL Database, we usually can't list from master; try anyway,
-      // and if it fails, return an empty list (user must type the DB name).
-      const outFile = path.join(TMP_DIR, `dblist-${cfg.id}.out`);
-      const sqlFile = path.join(TMP_DIR, `dblist-${cfg.id}.sql`);
-      await writeFile(sqlFile, `SET NOCOUNT ON;
-SET ANSI_WARNINGS OFF;
-SELECT (SELECT name FROM sys.databases WHERE database_id > 4 AND state_desc='ONLINE' ORDER BY name FOR JSON PATH) AS dbs;`, 'utf8');
-      try {
-        if (cfg.auth === 'azuread-interactive') await ensureAzCliSession(cfg);
-        const useAzCli = cfg.auth === 'azuread-interactive';
-        const args = buildSqlcmdArgs(cfg, ['-l','10','-t','15','-y','0','-Y','0','-w','65535','-i',sqlFile,'-o',outFile], { useAccessToken: useAzCli });
-        await new Promise((resolve, reject) => {
-          execFile(pickSqlcmd(cfg), args, { timeout: 20000, windowsHide: true, encoding: 'utf8' },
-            (err, stdout, stderr) => err ? reject(new Error((stderr||err.message).slice(0,300))) : resolve());
-        });
-        const raw = await readFile(outFile, 'utf8');
-        const firstBrace = Math.min(...[raw.indexOf('{'), raw.indexOf('[')].filter(i => i >= 0));
-        if (firstBrace < 0) return json(res, 200, { databases: [] });
-        const trimmed = raw.slice(firstBrace).trim().replace(/\r?\n/g, '');
-        const parsed = JSON.parse(trimmed);
-        const dbs = Array.isArray(parsed) ? parsed.map(x => x.name) : (parsed.dbs ? JSON.parse(parsed.dbs).map(x=>x.name) : []);
-        return json(res, 200, { databases: dbs });
-      } catch (e) {
-        return json(res, 200, { databases: [], warning: e.message.slice(0,300) });
+      if (cfg.server !== stored.server || cfg.connectionType !== (stored.connectionType || 'auto')) delete cfg.engineEdition;
+      validateRequestConnection(cfg, { requireDatabase: false });
+      if (!cfg.password && !body.clearPassword && stored.id &&
+          cfg.auth === stored.auth &&
+          cfg.server.trim().toLowerCase() === stored.server.trim().toLowerCase() &&
+          cfg.user.trim().toLowerCase() === (stored.user || '').trim().toLowerCase() &&
+          cfg.tenant === (stored.tenant || '')) {
+        cfg.password = await decryptPassword(stored.passwordEnc || '');
       }
+      // MI/on-prem catalog queries explicitly use master. SQL DB can instead
+      // list what a contained user sees from the manually entered database.
+      if (!isAzureDbLike(cfg) || !cfg.database.trim()) cfg.database = 'master';
+      try {
+        const parsed = await runSqlcmdJson(cfg, `SET NOCOUNT ON;
+SET ANSI_WARNINGS ON;
+SELECT (SELECT name FROM sys.databases WHERE database_id > 4 AND state_desc='ONLINE' ORDER BY name FOR JSON PATH) AS dbs;`,
+          'dblist', 15, { ...context, allowLogin: true });
+        throwIfConnectionAborted(context.signal);
+        const rows = Array.isArray(parsed) ? parsed : typeof parsed?.dbs === 'string' ? JSON.parse(parsed.dbs) : null;
+        if (!Array.isArray(rows)) throw new Error('Database list returned an unexpected SQL result');
+        const dbs = rows.map(x => x?.name);
+        if (!dbs.every(name => typeof name === 'string')) throw new Error('Database list returned an unexpected SQL result');
+        return json(res, 200, {
+          databases: dbs,
+          ...(dbs.length ? {} : { warning: 'The connection succeeded, but no user databases are visible to this login. Enter the database name manually.' }),
+        });
+      } catch (e) {
+        if (e.code === 'PROCESS_CLEANUP_FAILED') throw e;
+        throwIfConnectionAborted(context.signal);
+        return json(res, 400, { error: redactSqlDiagnostic(e.message, cfg) + ' Enter the database name manually if catalog access is unavailable.' });
+      }
+      });
     }
 
     if (p === '/api/servers' && req.method === 'POST') {
       const body = await readBody(req);
+      if (!body || typeof body !== 'object' || Array.isArray(body)) throw requestError(400, 'Invalid connection request');
+      return await connectionProgress.run(body.operationId, req, res, async context => {
       if (!body.name || !body.server || !body.auth) return json(res, 400, { error: 'name, server, auth required' });
+      const connection = validateRequestConnection({ ...body, engineEdition: undefined });
+      await initializeRegistry();
       const plainPw = body.password || '';
       const cfg = {
         id: body.id || (body.name.toLowerCase().replace(/[^a-z0-9]+/g, '-') + '-' + crypto.randomBytes(2).toString('hex')),
@@ -1013,43 +1114,53 @@ SELECT (SELECT name FROM sys.databases WHERE database_id > 4 AND state_desc='ONL
         user: body.user || '',
         password: plainPw, // in-memory only for the test call
         database: body.database || '',
+        connectionType: connection.connectionType,
+        tenant: connection.tenant,
+        entraFlow: connection.entraFlow,
         encrypt: body.encrypt !== false,
         trustCert: body.trustCert !== false,
         addedAt: new Date().toISOString(),
       };
-      const t = await testConnection(cfg);
+      const t = await testConnection(cfg, context);
+      throwIfConnectionAborted(context.signal);
       if (!t.ok) return json(res, 400, { error: 'Connection test failed: ' + t.error });
-      try { cfg.engineEdition = await probeEngineEdition(cfg); } catch { /* non-fatal */ }
-      const list = await loadServers();
-      if (list.find(s => s.id === cfg.id)) return json(res, 400, { error: 'ID exists' });
+      try { cfg.engineEdition = await probeEngineEdition(cfg, context); }
+      catch (error) { if (error.code === 'PROCESS_CLEANUP_FAILED') throw error; }
+      throwIfConnectionAborted(context.signal);
+      validateRequestConnection(cfg);
       // Encrypt password before persisting; strip plaintext.
       cfg.passwordEnc = await encryptPassword(plainPw);
       delete cfg.password;
-      list.push(cfg);
-      await saveServers(list);
+      await commitConnection(context, () => updateServers(list => {
+        if (list.some(s => s.id === cfg.id)) throw requestError(400, 'ID exists');
+        list.push(cfg);
+      }));
       return json(res, 200, publicView(cfg));
+      });
     }
 
     if (p.startsWith('/api/servers/') && !p.includes('/counters') && req.method === 'DELETE') {
       const id = p.substring('/api/servers/'.length);
-      const list = await loadServers();
-      const idx = list.findIndex(s => s.id === id);
-      if (idx < 0) return json(res, 404, { error: 'not found' });
-      list.splice(idx, 1);
-      await saveServers(list);
-      cache.delete(id);
+      await updateServers(list => {
+        findServer(list, id);
+        list.splice(list.findIndex(s => s.id === id), 1);
+      });
+      invalidateMetrics(id);
+      emailAlerts.removeServer(id).catch(() => console.error('Could not remove deleted server from email alert state.'));
       return json(res, 200, { ok: true });
     }
 
     if (p.startsWith('/api/servers/') && !p.includes('/counters') && req.method === 'PATCH') {
       const id = p.substring('/api/servers/'.length);
       const body = await readBody(req);
-      const list = await loadServers();
-      const idx = list.findIndex(s => s.id === id);
-      if (idx < 0) return json(res, 404, { error: 'not found' });
-      const current = list[idx];
-      // Build the candidate cfg (in-memory shape with decrypted password for the test)
-      const candidate = {
+      if (!body || typeof body !== 'object' || Array.isArray(body)) throw requestError(400, 'Invalid connection request');
+      return await connectionProgress.run(body.operationId, req, res, async context => {
+      for (const field of ['name', 'server', 'user', 'database', 'password']) {
+        if (body[field] != null && typeof body[field] !== 'string') throw requestError(400, `Invalid connection ${field}`);
+      }
+      const current = findServer(await loadServers(), id);
+      const originalConnection = connectionIdentity(current);
+      let candidate = {
         ...current,
         name: (body.name ?? current.name).slice(0, 60),
         group: (body.group === null || body.group === '') ? null : ((body.group ?? current.group) ? String(body.group ?? current.group).slice(0, 40) : null),
@@ -1057,36 +1168,55 @@ SELECT (SELECT name FROM sys.databases WHERE database_id > 4 AND state_desc='ONL
         auth: body.auth ?? current.auth,
         user: body.user ?? current.user ?? '',
         database: body.database ?? current.database ?? '',
+        connectionType: body.connectionType ?? current.connectionType ?? 'auto',
+        tenant: body.tenant ?? current.tenant ?? '',
+        entraFlow: body.entraFlow ?? current.entraFlow ?? 'browser',
         encrypt: body.encrypt ?? current.encrypt !== false,
         trustCert: body.trustCert ?? current.trustCert !== false,
       };
-      // Password: if body has a non-empty password field, replace; if empty string
-      // AND passwordEnc is currently non-empty and body.clearPassword===true, wipe.
+      // Slow network/authentication checks must not hold the registry queue.
+      if (connectionIdentity(candidate) !== originalConnection) delete candidate.engineEdition;
+      validateRequestConnection(candidate);
       let plainForTest = '';
-      if (typeof body.password === 'string' && body.password.length > 0) {
-        plainForTest = body.password;
-      } else if (body.clearPassword) {
-        candidate.passwordEnc = '';
-      } else {
-        // Keep existing encrypted password; decrypt for test
+      if (body.clearPassword) candidate.passwordEnc = '';
+      else if (typeof body.password === 'string' && body.password.length > 0) plainForTest = body.password;
+      else if (candidate.auth === current.auth &&
+          candidate.server.trim().toLowerCase() === current.server.trim().toLowerCase() &&
+          candidate.user.trim().toLowerCase() === (current.user || '').trim().toLowerCase() &&
+          candidate.tenant === (current.tenant || '')) {
         plainForTest = await decryptPassword(current.passwordEnc || '');
-      }
-      // Test connection with the candidate values
+      } else candidate.passwordEnc = '';
       const testCfg = { ...candidate, password: plainForTest };
-      const t = await testConnection(testCfg);
-      if (!t.ok) return json(res, 400, { error: 'Connection test failed: ' + t.error });
-      // Re-probe engine edition (server may have changed)
-      try { candidate.engineEdition = await probeEngineEdition(testCfg); } catch { /* keep existing */ }
-      // Store: encrypt new password if provided
-      if (plainForTest && !body.clearPassword) {
+      const t = await testConnection(testCfg, context);
+      throwIfConnectionAborted(context.signal);
+      if (!t.ok) throw requestError(400, 'Connection test failed: ' + t.error);
+      try { candidate.engineEdition = await probeEngineEdition(testCfg, context); }
+      catch (error) { if (error.code === 'PROCESS_CLEANUP_FAILED') throw error; }
+      throwIfConnectionAborted(context.signal);
+      validateRequestConnection(candidate);
+      if (typeof body.password === 'string' && body.password.length > 0 && !body.clearPassword) {
         candidate.passwordEnc = await encryptPassword(plainForTest);
       }
-      // Strip transient plaintext
       delete candidate.password;
-      list[idx] = candidate;
-      await saveServers(list);
-      cache.delete(id);   // Force fresh collect with new creds
+      await commitConnection(context, () => updateServers(list => {
+        const latest = findServer(list, id);
+        if (connectionIdentity(latest) !== originalConnection) {
+          throw requestError(409, 'Server connection changed during testing; reload and retry');
+        }
+        const merged = { ...latest };
+        for (const field of ['server', 'auth', 'user', 'database', 'encrypt', 'trustCert', 'passwordEnc', 'connectionType', 'tenant', 'entraFlow']) {
+          merged[field] = candidate[field];
+        }
+        if (body.name !== undefined) merged.name = candidate.name;
+        if (body.group !== undefined) merged.group = candidate.group;
+        if (candidate.engineEdition !== undefined) merged.engineEdition = candidate.engineEdition;
+        else if (connectionIdentity(candidate) !== originalConnection) delete merged.engineEdition;
+        candidate = merged;
+        list[list.findIndex(s => s.id === id)] = merged;
+      }));
+      invalidateMetrics(id);   // Force fresh collect with new creds
       return json(res, 200, publicView(candidate));
+      });
     }
 
     if (p === '/api/metrics' && req.method === 'GET') {
@@ -1094,18 +1224,19 @@ SELECT (SELECT name FROM sys.databases WHERE database_id > 4 AND state_desc='ONL
       const list = await loadServers();
       const cfgStored = id ? list.find(s => s.id === id) : list[0];
       if (!cfgStored) return json(res, 404, { error: 'No server configured' });
-      const now = Date.now();
-      const c = cache.get(cfgStored.id);
-      if (c && (now - c.at) < CACHE_MS) return json(res, 200, c.data);
-      const cfg = await resolveServer(cfgStored);
-      const data = await collectFor(cfg);
-      // If engineEdition was newly probed inside collectFor, persist it
-      if (cfg.engineEdition && cfgStored.engineEdition !== cfg.engineEdition) {
-        cfgStored.engineEdition = cfg.engineEdition;
-        await saveServers(list);
+      try {
+        const data = await getMetricsFor(cfgStored);
+        return json(res, 200, { ...data, monitoringPaused: data.monitoringPaused === true });
+      } catch (error) {
+        if (error.monitoringPaused) {
+          const current = findServer(await loadServers(), cfgStored.id);
+          return json(res, error.status || 409, {
+            error: current.monitoringPaused ? error.message : 'Monitoring changed during collection; refresh and retry',
+            monitoringPaused: current.monitoringPaused === true,
+          });
+        }
+        throw error;
       }
-      cache.set(cfgStored.id, { at: Date.now(), data });
-      return json(res, 200, data);
     }
 
     if (p === '/api/query-detail' && req.method === 'GET') {
@@ -1138,19 +1269,9 @@ SELECT
    FOR JSON PATH)) AS plans
 FOR JSON PATH, WITHOUT_ARRAY_WRAPPER;
 `;
-      const detailFile = path.join(TMP_DIR, `detail-${cfg.id}-${qid}.out`);
-      const detailSql = path.join(TMP_DIR, `detail-${cfg.id}-${qid}.sql`);
-      await writeFile(detailSql, sql, 'utf8');
-      if (cfg.auth === 'azuread-interactive') await ensureAzCliSession(cfg);
-      const useAzCliDetail = cfg.auth === 'azuread-interactive';
-      await new Promise((resolve, reject) => {
-        const args = buildSqlcmdArgs(cfg, ['-l', '10', '-t', '30', '-y', '0', '-Y', '0', '-i', detailSql, '-o', detailFile], { useAccessToken: useAzCliDetail });
-        execFile(pickSqlcmd(cfg), args, { timeout: 40000, windowsHide: true, encoding: 'utf8' },
-          (err, stdout, stderr) => err ? reject(new Error(stderr||err.message)) : resolve());
-      });
-      const raw = await readFile(detailFile, 'utf8');
+      const raw = await runSqlcmdOutput(cfg, sql, 'detail', ['-l', '10', '-t', '30', '-y', '0', '-Y', '0'], 40000);
       const firstBrace = Math.min(...[raw.indexOf('{'), raw.indexOf('[')].filter(i => i >= 0));
-      const trimmed = raw.slice(firstBrace >= 0 ? firstBrace : 0).trim();
+      const trimmed = raw.slice(Number.isFinite(firstBrace) ? firstBrace : 0).trim();
       let data;
       try { data = JSON.parse(trimmed); }
       catch (e) { try { data = JSON.parse(trimmed.replace(/\r?\n/g,'')); } catch { return json(res, 500, { error: 'parse failed', raw: trimmed.slice(0,500) }); } }
@@ -1170,39 +1291,30 @@ FOR JSON PATH, WITHOUT_ARRAY_WRAPPER;
     if (p.match(/^\/api\/servers\/[^/]+\/counters$/) && req.method === 'POST') {
       const id = p.split('/')[3];
       const body = await readBody(req);
-      const list = await loadServers();
-      const s = list.find(x => x.id === id);
-      if (!s) return json(res, 404, { error: 'server not found' });
-      if (!body.name || !body.sql) return json(res, 400, { error: 'name and sql required' });
-      try { validateCounterSql(body.sql); } catch (e) { return json(res, 400, { error: e.message }); }
-      s.customCounters = s.customCounters || [];
-      const cc = {
-        id: body.id || ('cc-' + crypto.randomBytes(3).toString('hex')),
-        name: body.name.slice(0, 60),
-        sql: body.sql.trim(),
-        unit: body.unit || '',
-        description: (body.description || '').slice(0, 200),
-        warnGt: body.warnGt === '' || body.warnGt == null ? null : Number(body.warnGt),
-        critGt: body.critGt === '' || body.critGt == null ? null : Number(body.critGt),
-        warnLt: body.warnLt === '' || body.warnLt == null ? null : Number(body.warnLt),
-        critLt: body.critLt === '' || body.critLt == null ? null : Number(body.critLt),
-      };
-      const idx = s.customCounters.findIndex(x => x.id === cc.id);
-      if (idx >= 0) s.customCounters[idx] = cc;
-      else s.customCounters.push(cc);
-      await saveServers(list);
-      cache.delete(id);
+      let cc;
+      await updateServers(list => {
+        const s = findServer(list, id);
+        s.customCounters = s.customCounters || [];
+        const idx = s.customCounters.findIndex(x => x.id === body?.id);
+        try { cc = normalizeCounter(body, idx >= 0 ? s.customCounters[idx] : {}); }
+        catch (error) { throw requestError(400, error.message); }
+        if (idx >= 0) s.customCounters[idx] = cc;
+        else {
+          if (s.customCounters.length >= 20) throw requestError(400, 'An instance may have at most 20 custom counters');
+          s.customCounters.push(cc);
+        }
+      });
+      invalidateMetrics(id);
       return json(res, 200, cc);
     }
     if (p.match(/^\/api\/servers\/[^/]+\/counters\/[^/]+$/) && req.method === 'DELETE') {
       const parts = p.split('/');
       const id = parts[3], ccid = parts[5];
-      const list = await loadServers();
-      const s = list.find(x => x.id === id);
-      if (!s) return json(res, 404, { error: 'server not found' });
-      s.customCounters = (s.customCounters || []).filter(x => x.id !== ccid);
-      await saveServers(list);
-      cache.delete(id);
+      await updateServers(list => {
+        const s = findServer(list, id);
+        s.customCounters = (s.customCounters || []).filter(x => x.id !== ccid);
+      });
+      invalidateMetrics(id);
       return json(res, 200, { ok: true });
     }
     if (p.match(/^\/api\/servers\/[^/]+\/counters\/test$/) && req.method === 'POST') {
@@ -1214,7 +1326,7 @@ FOR JSON PATH, WITHOUT_ARRAY_WRAPPER;
       try { validateCounterSql(body.sql); } catch (e) { return json(res, 400, { error: e.message }); }
       try {
         const cfg = await resolveServer(s);
-        const result = await runCustomCounter(cfg, { id: 'test-' + Date.now(), sql: body.sql });
+        const result = await counterRunner.test(cfg, body.sql);
         return json(res, 200, result);
       } catch (e) {
     return json(res, 400, { error: e.message.slice(0, 400) });
@@ -1248,53 +1360,30 @@ FOR JSON PATH, WITHOUT_ARRAY_WRAPPER;
     }
 
     // ==============================
-    // AI: list Ollama models + ask a question about a server
+    // AI settings and models do not send SQL data to a provider.
     // ==============================
-    if (p === '/api/ai/models' && req.method === 'GET') {
-      try {
-        const models = await ollamaListModels();
-        return json(res, 200, { models, ollamaUrl: OLLAMA_URL });
-      } catch (e) {
-        return json(res, 400, { error: 'Ollama not reachable at ' + OLLAMA_URL + ': ' + e.message.slice(0, 300) });
-      }
+    if (p.startsWith('/api/ai/') && req.method === 'POST'
+      && !/^application\/json(?:;|$)/i.test(req.headers['content-type'] || '')) {
+      throw requestError(415, 'AI requests require application/json');
     }
-    if (p === '/api/ai/ask' && req.method === 'POST') {
+    if (p === '/api/ai/settings' && req.method === 'GET') return json(res, 200, await ai.settings());
+    if (p === '/api/ai/settings' && req.method === 'POST') return json(res, 200, await ai.saveSettings(await readBody(req)));
+    if (p === '/api/ai/models' && req.method === 'GET') return json(res, 200, await ai.listModels(url.searchParams.get('providerId')));
+    if (p === '/api/ai/status' && req.method === 'GET') return json(res, 200, await ai.status(url.searchParams.get('providerId')));
+    if (p === '/api/ai/login-status' && req.method === 'GET') return json(res, 200, ai.loginStatus());
+    if (p === '/api/ai/login' && req.method === 'POST') return json(res, 200, await ai.startGitHubLogin(await readBody(req)));
+    if (p === '/api/ai/test' && req.method === 'POST') {
       const body = await readBody(req);
-      if (!body.serverId || !body.question) return json(res, 400, { error: 'serverId and question required' });
-      const list = await loadServers();
-      const s = list.find(x => x.id === body.serverId);
-      if (!s) return json(res, 404, { error: 'server not found' });
-      const model = body.model || 'llama3.1:8b';
-      const question = String(body.question).slice(0, 4000);
-      // Use cached data if fresh, else collect
-      let data;
-      const c = cache.get(s.id);
-      if (c && Date.now() - c.at < 60000) data = c.data;
-      else {
-        try {
-          const cfg = await resolveServer(s);
-          data = await collectFor(cfg);
-          cache.set(s.id, { at: Date.now(), data });
-        } catch (e) { return json(res, 400, { error: 'Failed to collect metrics: ' + e.message.slice(0, 300) }); }
-      }
-      const history = await loadHistory(s.id);
-      const ctx = buildAiContext(data, history);
-      const system = `You are a senior SQL Server DBA assistant. You are given a JSON snapshot of a live SQL Server instance (waits, top queries, missing indexes, resource pressure, and a short history of samples).
-
-Rules:
-- Ground every claim in the JSON data. If the data does not support a claim, say so.
-- Prefer specific, actionable recommendations (e.g. "add index on X.Y", "review the query with query_id=42 that averages 320ms CPU").
-- Wait-percentage interpretation follows the Paul Randal / Microsoft Learn methodology (signal wait % > 25 = CPU pressure; PAGEIOLATCH dominant = IO bottleneck; WRITELOG dominant = log disk; RESOURCE_SEMAPHORE = memory grants; LCK_M_* = blocking).
-- Keep answers concise. Use short markdown sections and bullet lists. Avoid long preambles.
-- Never invent DMV rows, index names, or query text that are not in the JSON.`;
-      const userMsg = `Server: ${s.name} (${s.server}), engine=${data.engine || '?'}\n\nUser question:\n${question}\n\nMetrics JSON (compact):\n\`\`\`json\n${JSON.stringify(ctx)}\n\`\`\``;
-      try {
-        const answer = await ollamaChat({ model, system, user: userMsg });
-        return json(res, 200, { answer, model, contextBytes: JSON.stringify(ctx).length });
-      } catch (e) {
-        return json(res, 400, { error: 'AI call failed: ' + e.message.slice(0, 500) });
-      }
+      if (!body || typeof body !== 'object' || Array.isArray(body)) throw requestError(400, 'Invalid provider test request');
+      const answer = await ai.chat({
+        providerId: body.providerId, model: body.model, reasoningEffort: body.reasoningEffort,
+        system: 'Reply with exactly OK.', user: 'Health check. Reply with exactly OK.',
+      });
+      return json(res, 200, { answer });
     }
+    if (p === '/api/ai/context' && req.method === 'POST') return json(res, 200, await aiPreviews.capture(await readBody(req)));
+    if (p === '/api/ai/preview' && req.method === 'POST') return json(res, 200, await aiPreviews.preview(await readBody(req)));
+    if (p === '/api/ai/ask' && req.method === 'POST') return json(res, 200, await aiPreviews.send(await readBody(req)));
 
     // ==============================
     // Live plan by plan_handle (for waiter/blocker rows)
@@ -1308,19 +1397,9 @@ Rules:
       if (!s) return json(res, 404, { error: 'server not found' });
       try {
         const cfg = await resolveServer(s);
-        if (cfg.auth === 'azuread-interactive') await ensureAzCliSession(cfg);
-        const useAzCli = cfg.auth === 'azuread-interactive';
-        const outFile = path.join(TMP_DIR, `plan-${cfg.id}-${Date.now()}.out`);
-        const sqlFile = path.join(TMP_DIR, `plan-${cfg.id}-${Date.now()}.sql`);
-        const sql = `SET NOCOUNT ON; SET ANSI_WARNINGS OFF;
+        const sql = `SET NOCOUNT ON; SET ANSI_WARNINGS ON;
 SELECT CAST(query_plan AS NVARCHAR(MAX)) AS xml_plan FROM sys.dm_exec_query_plan(${body.planHandleHex});`;
-        await writeFile(sqlFile, sql, 'utf8');
-        const args = buildSqlcmdArgs(cfg, ['-l','10','-t','20','-w','65535','-y','0','-Y','0','-i',sqlFile,'-o',outFile], { useAccessToken: useAzCli });
-        await new Promise((resolve, reject) => {
-          execFile(pickSqlcmd(cfg), args, { timeout: 30000, windowsHide: true, encoding: 'utf8' },
-            (err, stdout, stderr) => err ? reject(new Error((stderr||err.message).slice(0,300))) : resolve());
-        });
-        const raw = (await readFile(outFile, 'utf8'));
+        const raw = await runSqlcmdOutput(cfg, sql, 'plan', ['-l','10','-t','20','-w','65535','-y','0','-Y','0'], 30000);
         // Extract from first <ShowPlanXML through last </ShowPlanXML>
         const start = raw.indexOf('<ShowPlanXML');
         const end = raw.lastIndexOf('</ShowPlanXML>');
@@ -1337,12 +1416,13 @@ SELECT CAST(query_plan AS NVARCHAR(MAX)) AS xml_plan FROM sys.dm_exec_query_plan
     if (p === '/api/servers/reorder' && req.method === 'POST') {
       const body = await readBody(req);
       const order = Array.isArray(body.order) ? body.order : [];
-      const list = await loadServers();
-      const byId = new Map(list.map(s => [s.id, s]));
-      const reordered = [];
-      for (const id of order) if (byId.has(id)) { reordered.push(byId.get(id)); byId.delete(id); }
-      for (const s of byId.values()) reordered.push(s); // any servers not mentioned go at end
-      await saveServers(reordered);
+      const reordered = await updateServers(list => {
+        const byId = new Map(list.map(s => [s.id, s]));
+        const result = [];
+        for (const id of order) if (byId.has(id)) { result.push(byId.get(id)); byId.delete(id); }
+        for (const s of byId.values()) result.push(s); // any servers not mentioned go at end
+        return result;
+      });
       return json(res, 200, { ok: true, count: reordered.length });
     }
 
@@ -1360,17 +1440,11 @@ SELECT CAST(query_plan AS NVARCHAR(MAX)) AS xml_plan FROM sys.dm_exec_query_plan
       if (!s) return json(res, 404, { error: 'server not found' });
       try {
         const cfg = await resolveServer(s);
-        if (cfg.auth === 'azuread-interactive') await ensureAzCliSession(cfg);
-        const useAzCli = cfg.auth === 'azuread-interactive';
-        const args = buildSqlcmdArgs(cfg, ['-l','10','-t','15','-Q',`KILL ${sid}`], { useAccessToken: useAzCli });
-        await new Promise((resolve, reject) => {
-          execFile(pickSqlcmd(cfg), args, { timeout: 20000, windowsHide: true, encoding: 'utf8' },
-            (err, stdout, stderr) => err ? reject(new Error((stderr||err.message).slice(0,300))) : resolve());
-        });
-        cache.delete(body.serverId);
+        await runSqlcmdOutput(cfg, `KILL ${sid};`, 'kill', ['-l','10','-t','15'], 30000);
+        invalidateMetrics(body.serverId);
         return json(res, 200, { ok: true, killed: sid });
       } catch (e) {
-        return json(res, 400, { error: e.message.slice(0, 400) });
+        return json(res, 400, { error: redactSqlDiagnostic(e.message, s).slice(0, 6000) });
       }
     }
 
@@ -1382,11 +1456,27 @@ SELECT CAST(query_plan AS NVARCHAR(MAX)) AS xml_plan FROM sys.dm_exec_query_plan
 
     res.writeHead(404); res.end('not found');
   } catch (e) {
-    console.error('REQ ERROR:', e);
-    json(res, 500, { error: String(e.message || e) });
+    const message = redactSqlDiagnostic(String(e.message || e));
+    console.error('REQ ERROR:', message);
+    const emailAuthStatus = String(req.url || '').startsWith('/api/alerts/microsoft/') &&
+      ['EAUTH', 'MICROSOFT_AUTH_REQUIRED', 'MICROSOFT_AUTH_CHANGED'].includes(e.code)
+      ? e.code === 'MICROSOFT_AUTH_CHANGED' ? 409 : 400 : null;
+    if (!res.writableEnded && !res.destroyed) json(res, e.status || emailAuthStatus || (e.aiSafe ? 400 : 500), { error: message });
   }
 });
 
 server.listen(PORT, '127.0.0.1', () => {
-  console.log(`SQL dashboard listening on http://127.0.0.1:${PORT}`);
+  console.log(`SQL Pulse listening on http://127.0.0.1:${server.address().port}`);
+  emailAlerts.settings().then(configureEmailMonitoring).catch(() => {
+    emailMonitoringEnabled = false;
+    monitor.configure({ enabled: false });
+    console.error('Email monitoring is disabled: settings or alert state could not be read. Review Email alerts settings.');
+  });
+});
+server.on('close', () => {
+  monitor.stop();
+  emailMonitoringEnabled = false;
+  emailAlerts.close().catch(() => console.error('Email service cleanup failed.'));
+  microsoftEmailAuth.close().catch(() => console.error('Microsoft email sign-in cleanup failed.'));
+  ai.close().catch(error => console.error(`AI cleanup failed: ${error.message}`));
 });

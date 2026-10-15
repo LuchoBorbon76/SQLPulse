@@ -1,0 +1,33 @@
+.modal.alert-settings-modal{width:min(790px,94vw);max-width:790px;max-height:90vh;overflow:auto;padding:26px;color:var(--cp-text);background:var(--cp-surface)}
+#alert-settings-backdrop{z-index:110;}
+.email-heading{display:flex;justify-content:space-between;align-items:flex-start;gap:20px;margin-bottom:16px}
+.email-heading h2{margin:0 0 5px;font-size:22px}.email-heading p{margin:0}
+.email-muted,.email-field small,.email-switch small{color:var(--cp-text-muted);font-size:12px;line-height:1.6}
+.email-notice{padding:13px 15px;border:1px solid var(--cp-border);border-radius:10px;background:var(--cp-accent-soft);color:var(--cp-text);font-size:12px;line-height:1.65}
+.email-switch{display:flex;align-items:flex-start;gap:12px;padding:16px;border:1px solid var(--cp-border);border-radius:12px;margin:20px 0;background:var(--cp-surface-soft)}
+.email-switch input{margin-top:4px}.email-switch strong,.email-switch small{display:block}.email-switch small{margin-top:5px}
+#email-options.email-options-disabled{opacity:.5;filter:grayscale(1);}
+#email-options input:disabled,#email-options select:disabled,#email-options textarea:disabled{cursor:not-allowed;}
+.email-actions button:disabled{cursor:not-allowed;}
+#email-settings-form fieldset{border:1px solid var(--cp-border);border-radius:12px;padding:18px;margin:18px 0}
+#email-settings-form legend{padding:0 8px;font-weight:600;font-size:13px}
+.email-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}.email-wide{grid-column:1/-1}
+.email-field{display:flex;flex-direction:column;gap:7px;font-size:12px;font-weight:600}
+.email-field input,.email-field select,.email-field textarea{width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid var(--cp-border);border-radius:8px;background:var(--cp-bg);color:var(--cp-text);font:inherit;font-weight:400}
+.email-field textarea{resize:vertical}.email-field input:focus,.email-field select:focus,.email-field textarea:focus{outline:2px solid var(--cp-accent);outline-offset:2px}
+.email-check{display:flex;gap:9px;align-items:flex-start;font-size:12px;line-height:1.6}.email-check input{margin-top:4px;flex-shrink:0}
+.email-microsoft-panel{padding:12px;border:1px solid var(--cp-border);border-radius:10px;background:var(--cp-surface-soft)}
+.email-microsoft-panel[hidden],.alert-settings-modal [hidden]{display:none!important}
+.email-microsoft-setup{margin-top:12px;font-size:12px;line-height:1.6}
+.email-microsoft-setup summary{cursor:pointer;color:var(--cp-text-muted)}
+.email-microsoft-setup code{font-size:11px;overflow-wrap:anywhere}
+#email-microsoft-link,.email-microsoft-setup a{color:var(--cp-link)}
+#email-microsoft-status{overflow-wrap:anywhere}
+.email-actions{display:flex;gap:10px;flex-wrap:wrap;margin:16px 0}.email-actions button:disabled{opacity:.5;cursor:wait}
+.email-preview{padding:18px;border:1px solid var(--cp-accent);border-radius:12px;margin-top:18px}
+.email-preview[hidden]{display:none}.email-preview h3{margin-top:0}.email-preview h4{font-size:13px}
+#email-preview-destination{white-space:pre-wrap;font-size:12px;line-height:1.7;overflow-wrap:anywhere}
+.email-preview pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.7 Consolas,"Courier New",monospace;background:var(--cp-bg);border:1px solid var(--cp-border);padding:14px;border-radius:8px}
+.email-status{font-size:13px;line-height:1.65;margin-top:12px;white-space:pre-wrap;overflow-wrap:anywhere}.email-error{color:var(--cp-danger)}
+#email-delivery{margin-top:8px;overflow-wrap:anywhere}
+@media(max-width:600px){.alert-settings-modal{padding:18px}.email-grid{grid-template-columns:1fr}.email-heading{gap:10px}.email-actions{flex-direction:column}.email-actions button{width:100%}}

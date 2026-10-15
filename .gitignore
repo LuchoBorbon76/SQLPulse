@@ -2,10 +2,23 @@
 .encryption-key
 servers.json
 servers.json.new
+ai-settings.json
+alert-settings.json
+alert-state.json
+microsoft-email-auth.json
+.*.tmp
 
 # Runtime
 node_modules/
 tmp/
+history/
+ai-copilot-home/
+dist/
+.reliability-*/
+tests/.api-test-*/
+tests/.ai-test-*/
+tests/.alerts-test-*/
+tests/.package-test-*/
 *.log
 *.err
 

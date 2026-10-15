@@ -4,11 +4,11 @@
     One-shot script to push this repo to GitHub under the LuchoBorbon76 account.
 
 .DESCRIPTION
-    Initializes git, commits, and pushes to https://github.com/LuchoBorbon76/sql-performance-dashboard.
+    Initializes git, commits, and pushes to https://github.com/LuchoBorbon76/SQLDashboard.
     You'll be prompted to sign in to GitHub in a browser (via Git Credential Manager) the first time.
 
 .PARAMETER RepoName
-    GitHub repository name (default: sql-performance-dashboard)
+    GitHub repository name (default: SQLDashboard)
 
 .PARAMETER GitHubUser
     GitHub username (default: LuchoBorbon76)
@@ -21,7 +21,7 @@
     .\Push-ToGitHub.ps1 -Private
 #>
 param(
-    [string]$RepoName    = 'sql-performance-dashboard',
+    [string]$RepoName    = 'SQLDashboard',
     [string]$GitHubUser  = 'LuchoBorbon76',
     [switch]$Private
 )
@@ -70,11 +70,14 @@ try {
 # Step 3: stage + commit
 Write-Host "==> Staging files..." -ForegroundColor Cyan
 git add -A
+if ($LASTEXITCODE -ne 0) { throw 'Git staging failed.' }
 $status = git status --porcelain
 if (-not $status) {
     Write-Host "  Nothing to commit" -ForegroundColor Yellow
 } else {
-    git commit -m "Initial commit: SQL Performance Dashboard v1.0.0" | Out-Null
+    $version = (Get-Content -LiteralPath (Join-Path $here 'package.json') -Raw | ConvertFrom-Json).version
+    git commit -m "Release SQL Pulse v$version" -m "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>" | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Git commit failed.' }
     Write-Host "  Committed" -ForegroundColor Green
 }
 
@@ -84,11 +87,16 @@ if ($remotes -notcontains 'origin') {
     git remote add origin $repoUrl
     Write-Host "==> Added remote 'origin' -> $repoUrl" -ForegroundColor Cyan
 } else {
-    git remote set-url origin $repoUrl
-    Write-Host "==> Updated remote 'origin' -> $repoUrl" -ForegroundColor Cyan
+    $existing = (git remote get-url origin).Trim()
+    if ($LASTEXITCODE -ne 0 -or $existing.TrimEnd('/') -ne $repoUrl) {
+        throw "origin is '$existing', not '$repoUrl'. Nothing was redirected or pushed."
+    }
 }
 
 # Step 5: push
+git --no-pager show --stat --oneline HEAD
+$approval = Read-Host "Publish this commit to $repoUrl on main? Type PUBLISH to continue"
+if ($approval -cne 'PUBLISH') { Write-Host 'Publication cancelled; the commit remains local.'; exit 0 }
 Write-Host "==> Pushing to GitHub (you may be prompted to sign in)..." -ForegroundColor Cyan
 git push -u origin main
 if ($LASTEXITCODE -ne 0) {

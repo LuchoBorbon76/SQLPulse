@@ -1,13 +1,13 @@
 ﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
-    Uninstalls SQL Server Performance Dashboard.
+    Uninstalls SQL Pulse.
 #>
 param([string]$InstallDir = "$env:LOCALAPPDATA\SqlDashboard")
 
 $ErrorActionPreference = 'Continue'
 
-Write-Host "Uninstalling SQL Server Performance Dashboard..." -ForegroundColor Cyan
+Write-Host "Uninstalling SQL Pulse..." -ForegroundColor Cyan
 
 # Stop running dashboard
 $c = Get-NetTCPConnection -LocalPort 8765 -State Listen -ErrorAction SilentlyContinue
@@ -17,21 +17,26 @@ if ($c) { Stop-Process -Id $c.OwningProcess -Force -ErrorAction SilentlyContinue
 schtasks /Delete /TN 'SqlDashboard-Autostart' /F 2>$null | Out-Null
 
 # Remove shortcuts (new + legacy names)
+Remove-Item "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\SQL Pulse" -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\SQL Dashboard" -Recurse -Force -ErrorAction SilentlyContinue
 $deskPath = [Environment]::GetFolderPath('Desktop')
+Remove-Item (Join-Path $deskPath 'SQL Pulse.lnk') -Force -ErrorAction SilentlyContinue
 Remove-Item (Join-Path $deskPath 'SQL Performance Dashboard.lnk') -Force -ErrorAction SilentlyContinue
 Remove-Item (Join-Path $deskPath 'SQL Dashboard.lnk') -Force -ErrorAction SilentlyContinue
 Remove-Item "$env:USERPROFILE\Desktop\SQL Dashboard.lnk" -Force -ErrorAction SilentlyContinue
 Write-Host "  Removed shortcuts"
 
 # Preserve config? Ask user
-if (Test-Path (Join-Path $InstallDir 'servers.json')) {
-    $ans = Read-Host "Keep server configuration (servers.json)? [Y/n]"
+$configFiles = @('servers.json', 'ai-settings.json', 'alert-settings.json', 'alert-state.json', 'microsoft-email-auth.json', '.encryption-key')
+if (@($configFiles | Where-Object { Test-Path (Join-Path $InstallDir $_) }).Count -gt 0) {
+    $ans = Read-Host "Keep server and AI provider configuration? [Y/n]"
     if ($ans -notmatch '^n') {
         $backup = "$env:USERPROFILE\SqlDashboard-config-backup"
         New-Item -ItemType Directory -Force -Path $backup | Out-Null
-        Copy-Item (Join-Path $InstallDir 'servers.json') $backup -Force -ErrorAction SilentlyContinue
-        Copy-Item (Join-Path $InstallDir '.encryption-key') $backup -Force -ErrorAction SilentlyContinue
+        foreach ($file in $configFiles) {
+            $source = Join-Path $InstallDir $file
+            if (Test-Path $source) { Copy-Item $source $backup -Force -ErrorAction Stop }
+        }
         Write-Host "  Config backed up to: $backup" -ForegroundColor Yellow
     }
 }

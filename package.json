@@ -1,18 +1,22 @@
-﻿{
-    "keywords":  [
-
-                 ],
-    "type":  "commonjs",
-    "dependencies":  {
-                         "mssql":  "^12.7.0"
-                     },
-    "main":  "server.mjs",
-    "scripts":  {
-                    "start":  "node server.mjs"
-                },
-    "name":  "sql-performance-dashboard",
-    "version":  "1.1",
-    "description":  "Live multi-instance SQL Server performance dashboard",
-    "author":  "Luis Fernando Borbon",
-    "license":  "MIT"
+{
+    "keywords": [],
+    "type": "module",
+    "dependencies": {
+        "@azure/msal-node": "7.1.0",
+        "@github/copilot-sdk": "1.0.21",
+        "nodemailer": "^10.0.16"
+    },
+    "main": "server.mjs",
+    "scripts": {
+        "start": "node server.mjs",
+        "test": "node --test"
+    },
+    "name": "sql-pulse",
+    "version": "1.4.2",
+    "engines": {
+        "node": "^20.19.0 || >=22.12.0"
+    },
+    "description": "Live multi-instance SQL Server performance dashboard",
+    "author": "Luis Fernando Borbon",
+    "license": "MIT"
 }

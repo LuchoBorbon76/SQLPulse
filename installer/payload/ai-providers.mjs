@@ -421,7 +421,7 @@ export function createAiProviders({
       try {
         const client = await getRuntime(c), accountToken = runtimeToken;
         const auth = await deadline(client.getAuthStatus(), discoveryTimeoutMs, 'Authentication check timed out.');
-        const validLogin = value => typeof value === 'string' && /^[a-z0-9](?:[a-z0-9-]{0,38})$/i.test(value) ? value : '';
+        const validLogin = value => typeof value === 'string' && /^[a-z0-9](?:[a-z0-9_-]{0,99})$/i.test(value) ? value : '';
         let login = auth?.isAuthenticated ? validLogin(auth.login) : '';
         let accountMessage = '';
         if (auth?.isAuthenticated && !login && accountToken) {

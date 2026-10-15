@@ -539,7 +539,8 @@ function clientFixture() {
   const rendered = [];
   const elements = new Map();
   const context = {
-    fetch: url => { const next = deferred(); requests.push({ url, ...next }); return next.promise; },
+    fetch: (url, options) => { const next = deferred(); requests.push({ url, options, ...next }); return next.promise; },
+    setTimeout,
     el: id => {
       if (!elements.has(id)) elements.set(id, { classList: { add() {}, remove() {} }, textContent: '' });
       return elements.get(id);
@@ -607,6 +608,34 @@ test('client invalidation drops old completions and failures clear only their ow
   await removed;
   assert.equal(client.state.has('one'), false);
   assert.equal(client.pending.size, 0);
+});
+
+test('returning to live retries browser transport once without treating it as a SQL outage', async () => {
+  const client = clientFixture();
+  const pending = client.select('one');
+  client.requests[0].reject(Object.assign(new Error('Failed to fetch'), { name: 'TypeError' }));
+  await new Promise(resolve => setTimeout(resolve, 550));
+  assert.equal(client.requests.length, 2);
+  client.requests[1].resolve(response('one'));
+  await pending;
+  assert.equal(client.state.get('one').lastError, null);
+  assert.deepEqual(client.rendered, ['one']);
+  const failed = client.refresh();
+  client.requests[2].reject(Object.assign(new Error('Failed to fetch'), { name: 'TypeError' }));
+  await new Promise(resolve => setTimeout(resolve, 550));
+  client.requests[3].reject(Object.assign(new Error('Failed to fetch'), { name: 'TypeError' }));
+  await failed;
+  assert.match(client.state.get('one').lastError, /browser-to-dashboard.*not confirmation of a SQL service outage/);
+});
+
+test('cancelled metrics fetch reported as TypeError never changes health or retries', async () => {
+  const client = clientFixture(), pending = client.select('one');
+  client.requests[0].options.signal.throwIfAborted();
+  client.pending.get('one').controller.abort();
+  client.requests[0].reject(Object.assign(new Error('Failed to fetch'), { name: 'TypeError' }));
+  await pending;
+  assert.equal(client.state.get('one').lastError, undefined);
+  assert.equal(client.requests.length, 1);
 });
 
 test('actual server selection independently loads metrics/history and manual refresh still works while paused', async () => {

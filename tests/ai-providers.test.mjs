@@ -289,20 +289,20 @@ test('signed-in status resolves a missing SDK login with the exact Copilot crede
       assert.deepEqual(args, ['api', '--hostname', 'github.com', 'user', '--jq', '.login']);
       assert.equal(options.env.GH_TOKEN, 'copilot-account-token');
       assert.equal(args.includes('copilot-account-token'), false);
-      return { stdout: 'actual-copilot-user\n' };
+      return { stdout: 'actual_copilot_user\n' };
     },
   });
   await service.saveSettings({ providerId: 'github', config: { secret: 'copilot-account-token' } });
   const result = await service.status('github');
   assert.equal(result.isAuthenticated, true);
-  assert.equal(result.login, 'actual-copilot-user');
+  assert.equal(result.login, 'actual_copilot_user');
   assert.equal(result.accountHost, 'github.com');
   assert.equal(requests.length, 1);
   assert.doesNotMatch(JSON.stringify(result), /copilot-account-token|unrelated-ambient-token/);
 });
 
 test('SDK identity needs no extra lookup and account lookup errors do not falsely sign the user out', async t => {
-  for (const login of ['sdk-user', '']) {
+  for (const login of ['sdk-user', 'managed_user', '']) {
     const { service } = await fixture(t, {
       loadCopilotSdk: sdkMock({ login }).loadCopilotSdk,
       execFileImpl: async () => { throw new Error('PRIVATE_TOKEN CLI failure'); },

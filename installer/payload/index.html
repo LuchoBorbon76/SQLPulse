@@ -2083,7 +2083,20 @@ function fetchMetrics(){
   setStatus('ok','Refreshing…');
   request.promise = (async () => {
   try {
-    const r = await fetch('/api/metrics?serverId='+encodeURIComponent(requestedId), {cache:'no-store', signal:request.controller.signal});
+    let r;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        r = await fetch('/api/metrics?serverId='+encodeURIComponent(requestedId), {cache:'no-store', signal:request.controller.signal});
+        break;
+      } catch (error) {
+        if (request.controller.signal.aborted || request.generation !== detailGeneration) return;
+        if (error.name !== 'TypeError') throw error;
+        if (attempt === 1) throw Object.assign(new Error('Cannot reach the local SQL Pulse dashboard. This is a browser-to-dashboard connection failure, not confirmation of a SQL service outage.'), { dashboardTransport: true });
+        if (dashboardView === 'detail' && requestedId === activeServerId) setStatus('stale', 'Reconnecting to local dashboard…');
+        await new Promise(resolve => setTimeout(resolve, 500));
+        if (request.controller.signal.aborted || request.generation !== detailGeneration) return;
+      }
+    }
     const data = await r.json();
     if (request.generation !== detailGeneration || serverState.get(requestedId) !== st || !servers.some(s => s.id === requestedId)) return;
     if (data.monitoringPaused !== undefined && request.pauseRevision === (pauseRevisions.get(requestedId) || 0) && !pauseUpdates.has(requestedId)) {
@@ -2133,12 +2146,12 @@ function fetchMetrics(){
     }
     renderServerList();
   } catch(e){
-    if (e.name === 'AbortError' || request.generation !== detailGeneration) return;
+    if (e.name === 'AbortError' || request.controller.signal.aborted || request.generation !== detailGeneration) return;
     if (serverState.get(requestedId) !== st || !servers.some(s => s.id === requestedId)) return;
     st.lastError = e.message;
     if (dashboardView === 'detail' && requestedId === activeServerId) {
       setStatus('err','Error');
-      el('err').textContent = `Fetch failed: ${e.message}`;
+      el('err').textContent = e.dashboardTransport ? e.message : `Fetch failed: ${e.message}`;
       el('err').classList.add('show');
       if (st.data) render(st.data, st.prevData);
       else renderHealth(null);

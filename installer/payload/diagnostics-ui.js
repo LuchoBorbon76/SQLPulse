@@ -50,6 +50,7 @@ export function initDiagnosticsUi({
     <p class="diagnostics-notice">Optional and OFF by default. Evidence stays on this computer; it is not sent to AI, email or any external service. Local files are not encrypted. SQL text, deadlock XML and plans can contain sensitive business values and credentials; redaction is best effort, not anonymization.</p>
       <form id="diagnostics-form">
         <label class="diagnostics-check diagnostics-master"><input name="enabled" type="checkbox"> Enable incident capture for monitored servers</label>
+        <fieldset id="diagnostics-options" class="diagnostics-dependent" disabled>
         <div class="diagnostics-choice-grid">
         <fieldset><legend>What to capture</legend>
           <label class="diagnostics-check"><input name="blocking" type="checkbox"> Blocking chains — sessions waiting on other sessions</label>
@@ -77,6 +78,7 @@ export function initDiagnosticsUi({
         </div>
         </details>
         <p class="diagnostics-muted">Removing text/plan opt-in deletes those retained payloads on save. Disabling collection stops future capture; other existing evidence remains until retention expiry. Global settings apply to every monitored connection.</p>
+        </fieldset>
         <div class="diagnostics-actions"><button class="btn" type="submit">Save explicit choices</button><button class="btn ghost" type="button" data-action="disable">Disable collection</button></div>
       </form>
     <details><summary>Collection limits, overhead and permissions</summary>
@@ -130,7 +132,20 @@ export function initDiagnosticsUi({
     dialog.setAttribute('aria-busy', String(value));
     dialog.querySelectorAll('button,input,select').forEach(node => { node.disabled = value && node.dataset.action !== 'close'; });
     dialog.querySelector('[data-action="collect"]').disabled = value || !saved?.enabled || !server?.id;
+    const disabled = value || !saved || !field('enabled').checked;
+    find('options').disabled = disabled;
+    find('options').inert = disabled;
+    find('options').setAttribute('aria-disabled', String(disabled));
+    dialog.querySelector('[data-action="disable"]').disabled = value || !saved?.enabled;
+    form.querySelector('button[type="submit"]').disabled = value || !saved ||
+      (!field('enabled').checked && saved.enabled === false);
   }
+  field('enabled').addEventListener('change', () => {
+    setBusy(busy);
+    say(field('enabled').checked ? 'Choose what to capture, then Save explicit choices.'
+      : saved?.enabled ? 'Capture options are disabled. Save explicit choices to stop collection.'
+      : 'Capture is off. Saved choices are preserved.');
+  });
   function renderSettings(value) {
     saved = value.settings || value;
     for (const key of flags) field(key).checked = saved[key] === true;
@@ -245,9 +260,12 @@ export function initDiagnosticsUi({
     event.preventDefault();
     if (!form.reportValidity()) return;
     perform(async token => {
-      const patch = Object.fromEntries(flags.map(key => [key, field(key).checked]));
-      for (const key of numbers) patch[key] = Number(field(key).value);
-      patch.maxBytes = Math.round(Number(field('maxMiB').value) * 1024 * 1024);
+      const patch = field('enabled').checked
+        ? Object.fromEntries(flags.map(key => [key, field(key).checked])) : { enabled: false };
+      if (patch.enabled) {
+        for (const key of numbers) patch[key] = Number(field(key).value);
+        patch.maxBytes = Math.round(Number(field('maxMiB').value) * 1024 * 1024);
+      }
       const value = await api('settings', patch);
       if (token !== operation || disposed) return;
       renderSettings(value); await refresh(token);

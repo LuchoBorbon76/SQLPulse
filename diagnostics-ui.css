@@ -11,6 +11,8 @@
 .diagnostics-checks{flex:none;max-height:100px;overflow:auto;scrollbar-width:thin}.diagnostics-dialog .diagnostics-checks{margin:0;padding:6px 10px}.diagnostics-checks .diagnostics-status{margin:6px 0}
 .diagnostics-choice-grid,.diagnostics-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
 .diagnostics-dialog fieldset{min-width:0;border:1px solid var(--cp-border);border-radius:9px;padding:10px;margin:0}.diagnostics-dialog legend{font-size:12px;padding:0 5px;font-weight:600}
+.diagnostics-dialog fieldset.diagnostics-dependent{border:0;padding:0;margin:0}
+.diagnostics-dependent[aria-disabled=true]{opacity:.42;filter:grayscale(1);pointer-events:none;user-select:none}
 .diagnostics-check{display:flex;align-items:flex-start;gap:8px;font-size:12px;line-height:1.5;margin:8px 0}.diagnostics-check input{margin-top:3px;flex:none}.diagnostics-master{padding:10px 12px;background:var(--cp-surface-soft);border-radius:8px;font-weight:600}
 .diagnostics-grid{margin:10px 0}.diagnostics-grid label,.diagnostics-filters label{display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--cp-text-muted);min-width:0}
 .diagnostics-dialog input[type=number],.diagnostics-dialog input[type=datetime-local],.diagnostics-dialog select{min-width:0;width:100%;box-sizing:border-box;color:var(--cp-text);background:var(--cp-bg);border:1px solid var(--cp-border);border-radius:7px;padding:6px 8px;font:inherit;min-height:32px}

@@ -39,6 +39,12 @@ test('dialog has fixed chrome and separate timeline/settings views instead of an
   assert.match(css, /\.diagnostics-dialog\{[^}]*overflow:hidden/);
   assert.match(css, /\.diagnostics-dialog\[open\]\{display:flex;flex-direction:column/);
   assert.match(css, /#diagnostics-timeline,#diagnostics-detail\{overflow:auto;min-height:0/);
+  assert.match(source, /id="diagnostics-options"[^>]*disabled/);
+  assert.match(source, /find\('options'\)\.disabled = disabled/);
+  assert.match(source, /find\('options'\)\.inert = disabled/);
+  assert.match(source, /field\('enabled'\)\.addEventListener\('change'/);
+  assert.match(source, /: \{ enabled: false \}/);
+  assert.match(css, /\.diagnostics-dependent\[aria-disabled=true\]\{opacity:\.42;filter:grayscale\(1\)/);
 });
 
 test('diagnostics API reports malformed/error responses and bounds requests even if fetch ignores AbortSignal', async () => {

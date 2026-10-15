@@ -355,7 +355,9 @@ export function initAiUi({
       const data = await api(`status?providerId=${encodeURIComponent(id)}`);
       if (destroyed || loginPending || guard !== statusSequence || id !== provider) return;
       if (el('ai-github-status')) {
-        el('ai-github-status').textContent = data.isAuthenticated ? `✓ Signed in${data.login ? `: ${data.login}` : ''}` : data.message || 'GitHub is not signed in.';
+        el('ai-github-status').textContent = data.isAuthenticated
+          ? `✓ Signed in${data.login ? ` as @${data.login} · ${data.accountHost || 'github.com'}` : ` · ${data.accountMessage || 'Account identity unavailable.'}`}`
+          : data.message || 'GitHub is not signed in.';
         el('ai-github-status').classList.toggle('ai-error', !data.isAuthenticated);
       }
     } catch (e) {

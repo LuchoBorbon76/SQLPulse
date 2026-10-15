@@ -279,13 +279,50 @@ test('HTTP/network errors, timeouts and empty answers never succeed or expose se
   }
 });
 
-function sdkMock({ empty = false, never = false, authenticated = true } = {}) {
+test('signed-in status resolves a missing SDK login with the exact Copilot credential, never the default CLI account', async t => {
+  const sdk = sdkMock({ login: '' }), requests = [];
+  const { service } = await fixture(t, {
+    loadCopilotSdk: sdk.loadCopilotSdk,
+    env: { GH_TOKEN: 'unrelated-ambient-token' },
+    execFileImpl: async (executable, args, options) => {
+      requests.push({ executable, args, options });
+      assert.deepEqual(args, ['api', '--hostname', 'github.com', 'user', '--jq', '.login']);
+      assert.equal(options.env.GH_TOKEN, 'copilot-account-token');
+      assert.equal(args.includes('copilot-account-token'), false);
+      return { stdout: 'actual-copilot-user\n' };
+    },
+  });
+  await service.saveSettings({ providerId: 'github', config: { secret: 'copilot-account-token' } });
+  const result = await service.status('github');
+  assert.equal(result.isAuthenticated, true);
+  assert.equal(result.login, 'actual-copilot-user');
+  assert.equal(result.accountHost, 'github.com');
+  assert.equal(requests.length, 1);
+  assert.doesNotMatch(JSON.stringify(result), /copilot-account-token|unrelated-ambient-token/);
+});
+
+test('SDK identity needs no extra lookup and account lookup errors do not falsely sign the user out', async t => {
+  for (const login of ['sdk-user', '']) {
+    const { service } = await fixture(t, {
+      loadCopilotSdk: sdkMock({ login }).loadCopilotSdk,
+      execFileImpl: async () => { throw new Error('PRIVATE_TOKEN CLI failure'); },
+    });
+    await service.saveSettings({ providerId: 'github', config: { secret: 'synthetic-token' } });
+    const result = await service.status('github');
+    assert.equal(result.isAuthenticated, true);
+    assert.equal(result.login, login);
+    if (!login) assert.match(result.accountMessage, /unavailable/);
+    assert.doesNotMatch(JSON.stringify(result), /PRIVATE_TOKEN|synthetic-token/);
+  }
+});
+
+function sdkMock({ empty = false, never = false, authenticated = true, login = 'mock-user' } = {}) {
   const record = { sessions: [], stopped: 0, disconnected: 0 };
   class CopilotClient {
     constructor(options) { record.options = options; }
     async start() {}
     async stop() { record.stopped++; }
-    async getAuthStatus() { return { isAuthenticated: authenticated, login: 'mock-user' }; }
+    async getAuthStatus() { return { isAuthenticated: authenticated, login }; }
     async listModels() { return [{ id: 'mock-model', name: 'Mock', capabilities: { supports: { reasoningEffort: true } }, supportedReasoningEfforts: ['low', 'high'] }]; }
     async createSession(options) {
       record.sessions.push(options);

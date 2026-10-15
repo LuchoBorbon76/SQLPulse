@@ -419,9 +419,27 @@ export function createAiProviders({
     const p = await selected(id), c = p.config, dest = await destination(p.id);
     if (p.id === 'github') {
       try {
-        const client = await getRuntime(c), auth = await deadline(client.getAuthStatus(), discoveryTimeoutMs, 'Authentication check timed out.');
+        const client = await getRuntime(c), accountToken = runtimeToken;
+        const auth = await deadline(client.getAuthStatus(), discoveryTimeoutMs, 'Authentication check timed out.');
+        const validLogin = value => typeof value === 'string' && /^[a-z0-9](?:[a-z0-9-]{0,38})$/i.test(value) ? value : '';
+        let login = auth?.isAuthenticated ? validLogin(auth.login) : '';
+        let accountMessage = '';
+        if (auth?.isAuthenticated && !login && accountToken) {
+          try {
+            const { stdout } = await execFileImpl(toolPath('gh'), ['api', '--hostname', 'github.com', 'user', '--jq', '.login'], {
+              env: { ...cleanEnv(), GH_TOKEN: accountToken, GH_PROMPT_DISABLED: '1' },
+              timeout: 10000, windowsHide: true, maxBuffer: 4096,
+            });
+            login = validLogin(stdout.trim());
+            if (!login) accountMessage = 'Account identity could not be read.';
+          } catch {
+            accountMessage = 'Account identity is unavailable; check GitHub CLI/network access.';
+          }
+        }
+        if (auth?.isAuthenticated && !login && !accountMessage) accountMessage = 'Account identity is unavailable.';
         return { ...dest, configured: Boolean(auth?.isAuthenticated), isAuthenticated: Boolean(auth?.isAuthenticated),
-          login: typeof auth?.login === 'string' ? auth.login.slice(0, 100) : '', message: auth?.isAuthenticated ? 'GitHub Copilot signed in.' : 'GitHub Copilot is not signed in.' };
+          login, accountMessage, accountHost: 'github.com',
+          message: auth?.isAuthenticated ? 'GitHub Copilot signed in.' : 'GitHub Copilot is not signed in.' };
       } catch (e) { return { ...dest, configured: false, isAuthenticated: false, message: identifiableError(e, 'GitHub authentication status could not be read.').message }; }
     }
     const missingEndpoint = !c.baseUrl;

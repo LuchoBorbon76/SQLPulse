@@ -14,5 +14,8 @@
 .ops-modal dd{margin:4px 0 0;font-size:12px;}
 .ops-modal section,.ops-modal details{border-top:1px solid var(--cp-border);margin-top:16px;padding-top:12px;}
 .ops-error{color:var(--cp-danger);}
+.ops-modal fieldset.ops-dependent{border:0;padding:0;margin:0;min-width:0;}
+.ops-dependent[aria-disabled=true]{opacity:.42;filter:grayscale(1);pointer-events:none;user-select:none;}
+.ops-dependent[aria-disabled=true] input,.ops-dependent[aria-disabled=true] select,.ops-dependent[aria-disabled=true] button{cursor:not-allowed;}
 .ops-modal input:focus-visible,.ops-modal select:focus-visible{outline:2px solid var(--cp-accent);outline-offset:2px;}
 @media(max-width:540px){.ops-fields,.ops-status-grid{grid-template-columns:1fr;}.ops-modal{padding:16px;}}

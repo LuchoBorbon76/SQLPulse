@@ -26,6 +26,7 @@ function dom() {
       }
     }
     get innerHTML() { return this.html || ''; }
+    setAttribute(name, value) { this[name] = value; }
     append() {}
     remove() {}
     focus() {}
@@ -66,6 +67,7 @@ async function fixture(t, override) {
 
 test('retention edits autosave independently and reload saved values instead of the seven-day default', async t => {
   const f = await fixture(t);
+  await f.store.save({ enabled: true });
   await f.controller.open();
   assert.equal(f.node('ops-retention').value, 7);
   f.node('ops-enabled').checked = true;
@@ -75,7 +77,7 @@ test('retention edits autosave independently and reload saved values instead of 
   assert.match(f.node('ops-retention-feedback').textContent, /Saved: 30 days/);
   const post = f.calls.find(call => call.options.method === 'POST');
   assert.deepEqual(JSON.parse(post.options.body), { history: { retentionDays: 30, rawRetentionDays: 30 } });
-  assert.equal((await f.store.settings()).enabled, false);
+  assert.equal((await f.store.settings()).enabled, true);
   assert.equal((await f.store.settings()).intervalSeconds, 60);
   assert.equal(f.node('ops-interval').value, '900', 'other unsaved edits are not repopulated');
   f.controller.close(); f.restart();
@@ -91,6 +93,7 @@ test('closing and reopening during retention save waits for persisted result bef
   const f = await fixture(t, async (url, options) => {
     if (options.method === 'POST') { entered(); await blocked; }
   });
+  await f.store.save({ enabled: true });
   await f.controller.open();
   f.node('ops-retention').value = '14';
   const saving = f.node('ops-retention').dispatch('change');
@@ -107,6 +110,7 @@ test('closing and reopening during retention save waits for persisted result bef
 test('invalid retention and failed saves are explicit, not replaced with seven or reported as saved', async t => {
   const f = await fixture(t, async (url, options) => options.method === 'POST'
     ? response({ error: 'Storage unavailable' }, 500) : undefined);
+  await f.store.save({ enabled: true });
   await f.controller.open();
   for (const value of ['', '0', '91', '1.5']) {
     f.node('ops-retention').value = value;
@@ -119,6 +123,31 @@ test('invalid retention and failed saves are explicit, not replaced with seven o
   assert.equal(f.node('ops-retention').value, '30');
   assert.match(f.node('ops-retention-feedback').textContent, /save not confirmed.*Storage unavailable/);
   assert.equal((await f.store.settings()).history.retentionDays, 7);
+});
+
+test('capture off disables and grays all dependent options but keeps master and Close usable; enabling restores values', async t => {
+  const f = await fixture(t);
+  await f.controller.open();
+  assert.equal(f.node('ops-enabled').disabled, false);
+  assert.equal(f.node('ops-close').disabled, false);
+  assert.equal(f.node('ops-options').disabled, true);
+  assert.equal(f.node('ops-options').inert, true);
+  assert.equal(f.node('ops-extras').inert, true);
+  assert.equal(f.node('ops-extras')['aria-disabled'], 'true');
+  assert.equal(f.node('ops-retention').disabled, true);
+  await f.node('ops-retention').dispatch('change');
+  assert.equal(f.calls.some(call => call.options.method === 'POST'), false);
+  f.node('ops-enabled').checked = true;
+  await f.node('ops-enabled').dispatch('change');
+  assert.equal(f.node('ops-options').disabled, false);
+  assert.equal(f.node('ops-extras').inert, false);
+  assert.equal(f.node('ops-retention').disabled, false);
+  assert.equal(f.node('ops-retention').value, 7);
+  f.node('ops-enabled').checked = false;
+  await f.node('ops-enabled').dispatch('change');
+  assert.equal(f.node('ops-extras').inert, true);
+  assert.equal(f.node('ops-save').disabled, true);
+  assert.equal(f.node('ops-enabled').disabled, false);
 });
 
 test('capture checkbox autosaves both off and on across reopening and store restart without saving unrelated drafts', async t => {

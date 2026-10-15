@@ -41,6 +41,7 @@ export function initOperationsUi({ fetchImpl = window.fetch.bind(window), onChan
       <label class="ops-check"><input type="checkbox" id="ops-enabled"> Keep capturing for Back in Time when the browser or app window is closed</label>
       <p class="ops-note" id="ops-capture-feedback" role="status" aria-live="polite">Changes save automatically.</p>
       <p class="ops-note">Requires the SQL Pulse backend or an explicitly installed Windows service to remain running, and the host awake. Capture stops if both are stopped. Independent of notifications. Paused servers stay paused.</p>
+      <fieldset id="ops-options" class="ops-dependent" disabled>
       <label class="ops-retention-field" for="ops-retention">Keep history for (days)<input id="ops-retention" type="number" min="1" max="90" step="1" value="7" required></label>
       <p class="ops-note" id="ops-retention-feedback" role="status" aria-live="polite">Changes save automatically when you finish editing. Seven days is used only before a value has been saved.</p>
       <p class="ops-note">Default: 7 days. Choose 1–90 days for recorded snapshots and summaries. Expired data is excluded immediately and purged automatically at startup, hourly while SQL Pulse runs, and when this setting is saved—even for paused or deleted servers. Lowering this value permanently deletes expired history. Disk/point limits can shorten coverage. Separate incident evidence, operational reports and owner-managed backups have their own retention policies.</p>
@@ -55,11 +56,14 @@ export function initOperationsUi({ fetchImpl = window.fetch.bind(window), onChan
       <p class="ops-note">New raw snapshots retain all performance sections, database/file labels, counter definitions and section times locally, unencrypted. More detail costs more disk: 32 MiB snapshot + 1 MiB journal per server; caps can shorten coverage. Up to 512 rows per section, 20 counters and 384 KiB detail per sample; omissions are marked. SQL/schema text uses the existing Incident evidence SQL text opt-in, plan identities its separate Retain plans opt-in; login/host identities are omitted. Performance capture does not fetch plan XML, and historical actions never query live SQL. Old records cannot recover missing detail. Shorter retention reduces disk use. Lowering retention permanently removes expired samples during maintenance.</p>
       </details>
       <button type="submit" class="btn" id="ops-save">Save monitoring settings</button>
+      </fieldset>
     </form>
     <p id="ops-feedback" role="status" aria-live="polite"></p>
+    <div id="ops-extras" class="ops-dependent" inert aria-disabled="true">
     <section id="ops-reports" class="ins-panel" aria-label="Local operational summaries"></section>
     <details><summary>Collector self-health</summary><section aria-labelledby="ops-status-heading"><h3 id="ops-status-heading">Collector self-health</h3><div id="ops-status"></div><button type="button" class="btn ghost" id="ops-refresh">Refresh status</button></section></details>
     <details><summary>Optional Windows service</summary><p>Use the packaged Install-Service.ps1 from an elevated PowerShell session. It requires the same Windows identity that owns the encrypted configuration. No service is installed or enabled by this panel.</p><p>Background collection cannot complete an interactive Microsoft sign-in. Sign in from the desktop before using unattended monitoring.</p></details>
+    </div>
   </section>`;
   document.body.append(backdrop);
   const read = id => backdrop.querySelector(`#${id}`);
@@ -85,9 +89,15 @@ export function initOperationsUi({ fetchImpl = window.fetch.bind(window), onChan
     busy = value;
     backdrop.querySelectorAll('input,select,button').forEach(node => { if (node.id !== 'ops-close') node.disabled = value; });
     const saving = Boolean(retentionPending || capturePending);
+    const dependentDisabled = value || !settingsLoaded || saving || !read('ops-enabled').checked;
+    read('ops-options').disabled = dependentDisabled;
+    for (const id of ['ops-options', 'ops-extras']) {
+      read(id).inert = dependentDisabled;
+      read(id).setAttribute('aria-disabled', String(dependentDisabled));
+    }
     read('ops-enabled').disabled = value || !settingsLoaded || saving;
-    read('ops-retention').disabled = value || !settingsLoaded || saving;
-    read('ops-save').disabled = value || !settingsLoaded || saving;
+    read('ops-retention').disabled = dependentDisabled;
+    read('ops-save').disabled = dependentDisabled;
   }
   async function refresh(guard = sequence) {
     try {
@@ -147,7 +157,7 @@ export function initOperationsUi({ fetchImpl = window.fetch.bind(window), onChan
     return capturePending;
   });
   listen(read('ops-retention'), 'change', () => {
-    if (busy || !settingsLoaded || retentionPending || capturePending) return;
+    if (busy || !settingsLoaded || retentionPending || capturePending || !read('ops-enabled').checked) return;
     const days = Number(read('ops-retention').value);
     if (!Number.isInteger(days) || days < 1 || days > 90) {
       read('ops-retention-feedback').textContent = 'Not saved. Enter a whole number from 1 to 90 days.';
@@ -176,7 +186,7 @@ export function initOperationsUi({ fetchImpl = window.fetch.bind(window), onChan
   });
   listen(read('ops-form'), 'submit', async event => {
     event.preventDefault();
-    if (busy || retentionPending || capturePending || !settingsLoaded) return;
+    if (busy || retentionPending || capturePending || !settingsLoaded || !read('ops-enabled').checked) return;
     const guard = sequence;
     setBusy(true); feedback('');
     try {
@@ -192,7 +202,7 @@ export function initOperationsUi({ fetchImpl = window.fetch.bind(window), onChan
   listen(backdrop, 'keydown', event => {
     if (event.key === 'Escape') close();
     if (event.key !== 'Tab') return;
-    const nodes = [...backdrop.querySelectorAll('button,input,select,summary')].filter(node => !node.disabled && node.getClientRects().length);
+    const nodes = [...backdrop.querySelectorAll('button,input,select,summary')].filter(node => !node.disabled && !node.closest('[inert]') && node.getClientRects().length);
     const first = nodes[0], last = nodes[nodes.length-1];
     if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
     else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }

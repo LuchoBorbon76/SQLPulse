@@ -32,10 +32,10 @@ test('monitoring settings UI serializes every budget and renders escaped self-he
   });
   test('retention is visible outside advanced collection and has a seven-day default and purge notice', async () => {
     const source = await readFile(new URL('../operations-ui.js', import.meta.url), 'utf8');
-    assert.ok(source.indexOf('id="ops-retention"') < source.indexOf('<details><summary>Advanced collection'));
+    assert.ok(source.indexOf('id="ops-retention"') < source.indexOf('<details id="ops-advanced"'));
     assert.match(source, /id="ops-retention"[^>]*min="1"[^>]*max="90"[^>]*value="7"/);
     assert.doesNotMatch(source, /ops-raw-retention/);
-    assert.match(source, /purged automatically at startup, hourly/);
+    assert.match(source, /Retention maintenance runs at startup, hourly and on retention save/);
     const css = await readFile(new URL('../operations-ui.css', import.meta.url), 'utf8');
     assert.match(css, /\.ops-retention-field input\{[^}]*text-align:center/);
   });

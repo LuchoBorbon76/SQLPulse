@@ -191,12 +191,12 @@ export function renderOperationalReport(report) {
       </details>`).join('')}`;
 }
 
-export function initReportUi({ host, fetchImpl = globalThis.fetch.bind(globalThis), now = Date.now } = {}) {
+export function initReportUi({ host, fetchImpl = globalThis.fetch.bind(globalThis), now = Date.now, disabled = false } = {}) {
   host.innerHTML = `<details id="rpt-panel"><summary>Local operational summaries</summary>
-    <p>Numeric history and recorded incident counts only, no SQL text/XML/plans. No email or webhook delivery.
-      Enabling summaries does not enable capture; periods without recorded samples are unavailable.
-      Schedules run only while the backend is alive. UTC schedule: daily or Monday weekly; latest missed slot only.
-      Up to 30 reports / 90 days / 2 MiB. Configuration changes start at the next slot.</p>
+    <p class="ops-note">Local numeric history and incident counts only; no SQL text, XML, plans, email or webhooks.
+      Explicit opt-in, off by default. Runs while the backend is alive; periods without samples are unavailable.</p>
+    <p class="ops-note">UTC: daily or Monday weekly; latest missed slot only. Up to 30 reports / 90 days / 2 MiB.
+      Schedule changes start at the next slot and do not enable capture.</p>
     <form id="rpt-form"><label><input type="checkbox" id="rpt-enabled"> Enable scheduled local generation</label>
       <label>Cadence <select id="rpt-cadence"><option value="daily">Daily</option><option value="weekly">Weekly (Monday)</option></select></label>
       <label>Hour (UTC) <input type="number" min="0" max="23" required id="rpt-hour"></label>
@@ -209,8 +209,8 @@ export function initReportUi({ host, fetchImpl = globalThis.fetch.bind(globalThi
   let sequence = 0, controller, busy = false, loaded = false, savedReports = [];
   function setBusy(value) {
     busy = value;
-    for (const id of ['rpt-save', 'rpt-refresh', 'rpt-generate']) node(id).disabled = value;
-    node('rpt-save').disabled = value || !loaded;
+    for (const id of ['rpt-enabled', 'rpt-cadence', 'rpt-hour', 'rpt-save', 'rpt-refresh', 'rpt-generate']) node(id).disabled = value || disabled;
+    node('rpt-save').disabled = value || disabled || !loaded;
   }
   async function load() {
     const run = ++sequence;
@@ -233,7 +233,7 @@ export function initReportUi({ host, fetchImpl = globalThis.fetch.bind(globalThi
     finally { if (run === sequence) setBusy(false); }
   }
   async function mutate(url, body) {
-    if (busy) return;
+    if (busy || disabled || !loaded) return;
     const run = sequence;
     setBusy(true); node('rpt-status').textContent = 'Saving / generating local summary…';
     try { await insightsRequest(fetchImpl, url, { body, timeoutMs: 120000 }); if (run === sequence) await load(); }
@@ -248,6 +248,7 @@ export function initReportUi({ host, fetchImpl = globalThis.fetch.bind(globalThi
   const generate = () => { const to = now(); return mutate('/api/reports/generate', { from: to - 86400000, to }); };
   const toggle = () => { if (node('rpt-panel').open) void load(); };
   const download = event => {
+    if (disabled || busy) return;
     const id = event.target.closest?.('[data-report-download]')?.dataset.reportDownload;
     const report = savedReports.find(report => report.id === id);
     if (!report) return;
@@ -262,7 +263,8 @@ export function initReportUi({ host, fetchImpl = globalThis.fetch.bind(globalThi
   node('rpt-refresh').addEventListener('click', load);
   node('rpt-generate').addEventListener('click', generate);
   host.addEventListener('click', download);
-  return { load, destroy() {
+  setBusy(false);
+  return { load, setDisabled(value) { disabled = value; setBusy(busy); }, destroy() {
     ++sequence; controller?.abort();
     node('rpt-panel').removeEventListener('toggle', toggle); node('rpt-form').removeEventListener('submit', submit);
     node('rpt-refresh').removeEventListener('click', load); node('rpt-generate').removeEventListener('click', generate);

@@ -36,16 +36,26 @@ export function initOperationsUi({ fetchImpl = window.fetch.bind(window), onChan
   const backdrop = document.createElement('div');
   backdrop.className = 'modal-backdrop'; backdrop.id = 'operations-backdrop';
   backdrop.innerHTML = `<section class="modal ops-modal" role="dialog" aria-modal="true" aria-labelledby="ops-heading">
-    <header><div><h2 id="ops-heading">Back in Time capture</h2><p>Manage background capture here. Browse past performance directly in each server's details.</p></div><button type="button" class="btn ghost" id="ops-close">Close</button></header>
-    <form id="ops-form">
-      <label class="ops-check"><input type="checkbox" id="ops-enabled"> Keep capturing for Back in Time when the browser or app window is closed</label>
-      <p class="ops-note" id="ops-capture-feedback" role="status" aria-live="polite">Changes save automatically.</p>
-      <p class="ops-note">Requires the SQL Pulse backend or an explicitly installed Windows service to remain running, and the host awake. Capture stops if both are stopped. Independent of notifications. Paused servers stay paused.</p>
-      <fieldset id="ops-options" class="ops-dependent" disabled>
+    <header><div><h2 id="ops-heading">Back in Time</h2><p>Capture settings · Browse history in each server's details.</p></div><button type="button" class="btn ghost" id="ops-close">Close</button></header>
+    <div class="ops-master">
+      <label class="ops-check"><input type="checkbox" id="ops-enabled"> Keep capturing when the app window is closed</label>
+      <p class="ops-note" id="ops-capture-feedback" role="status" aria-live="polite">Loading saved capture setting…</p>
+      <p class="ops-note" id="ops-availability">Options are unavailable until settings load.</p>
+    </div>
+    <div class="ops-tabs" role="tablist" aria-label="Back in Time settings">
+      <button type="button" role="tab" id="ops-tab-capture" aria-controls="ops-pane-capture" aria-selected="true">Capture</button>
+      <button type="button" role="tab" id="ops-tab-summaries" aria-controls="ops-pane-summaries" aria-selected="false" tabindex="-1">Summaries</button>
+      <button type="button" role="tab" id="ops-tab-health" aria-controls="ops-pane-health" aria-selected="false" tabindex="-1">Health &amp; service</button>
+    </div>
+    <div class="ops-content">
+    <div role="tabpanel" id="ops-pane-capture" aria-labelledby="ops-tab-capture">
+      <form id="ops-form">
+      <fieldset id="ops-options" class="ops-dependent" disabled inert aria-disabled="true">
+      <legend class="ops-sr-only">Capture options</legend>
       <label class="ops-retention-field" for="ops-retention">Keep history for (days)<input id="ops-retention" type="number" min="1" max="90" step="1" value="7" required></label>
-      <p class="ops-note" id="ops-retention-feedback" role="status" aria-live="polite">Changes save automatically when you finish editing. Seven days is used only before a value has been saved.</p>
-      <p class="ops-note">Default: 7 days. Choose 1–90 days for recorded snapshots and summaries. Expired data is excluded immediately and purged automatically at startup, hourly while SQL Pulse runs, and when this setting is saved—even for paused or deleted servers. Lowering this value permanently deletes expired history. Disk/point limits can shorten coverage. Separate incident evidence, operational reports and owner-managed backups have their own retention policies.</p>
-      <details><summary>Advanced collection</summary>
+      <p class="ops-note" id="ops-retention-feedback" role="status" aria-live="polite">Changes save automatically when you finish editing.</p>
+      <p class="ops-note">1–90 days; default 7 for new settings only. Expired history is purged automatically. Lowering retention permanently deletes expired history.</p>
+      <details id="ops-advanced"><summary>Advanced collection</summary>
       <div class="ops-fields">
         <label>Collection interval (seconds)<input id="ops-interval" type="number" min="30" max="3600" required></label>
         <label>Concurrent collection budget<select id="ops-concurrent"><option value="1">1 (lowest load)</option><option value="2">2 (default ceiling)</option></select></label>
@@ -53,22 +63,36 @@ export function initOperationsUi({ fetchImpl = window.fetch.bind(window), onChan
         <label>Query Store interval (seconds)<input id="ops-query-store" type="number" min="120" max="3600" required></label>
       </div>
       <label class="ops-check"><input id="ops-buffer" type="checkbox"> Collect buffer-pool distribution (can scan many descriptors on large instances)</label>
-      <p class="ops-note">New raw snapshots retain all performance sections, database/file labels, counter definitions and section times locally, unencrypted. More detail costs more disk: 32 MiB snapshot + 1 MiB journal per server; caps can shorten coverage. Up to 512 rows per section, 20 counters and 384 KiB detail per sample; omissions are marked. SQL/schema text uses the existing Incident evidence SQL text opt-in, plan identities its separate Retain plans opt-in; login/host identities are omitted. Performance capture does not fetch plan XML, and historical actions never query live SQL. Old records cannot recover missing detail. Shorter retention reduces disk use. Lowering retention permanently removes expired samples during maintenance.</p>
       </details>
-      <button type="submit" class="btn" id="ops-save">Save monitoring settings</button>
+      <details id="ops-storage"><summary>Storage &amp; privacy</summary>
+      <p class="ops-note">Snapshots stay local and unencrypted, including database/file labels, counter definitions and section times. Limits: 32 MiB snapshot + 1 MiB journal per server, 512 rows per section, 20 counters and 384 KiB detail per sample. Limits may shorten coverage; omissions are marked. Old records cannot recover missing detail.</p>
+      <p class="ops-note">SQL/schema text and plan identities require their separate Incident evidence opt-ins. Login/host identities are omitted. Capture does not fetch plan XML; browsing history never runs live SQL.</p>
+      <p class="ops-note">Retention maintenance runs at startup, hourly and on retention save, including paused/deleted servers. Incident evidence, operational reports and owner-managed backups have separate retention policies.</p>
+      </details>
       </fieldset>
-    </form>
-    <p id="ops-feedback" role="status" aria-live="polite"></p>
-    <div id="ops-extras" class="ops-dependent" inert aria-disabled="true">
-    <section id="ops-reports" class="ins-panel" aria-label="Local operational summaries"></section>
-    <details><summary>Collector self-health</summary><section aria-labelledby="ops-status-heading"><h3 id="ops-status-heading">Collector self-health</h3><div id="ops-status"></div><button type="button" class="btn ghost" id="ops-refresh">Refresh status</button></section></details>
-    <details><summary>Optional Windows service</summary><p>Use the packaged Install-Service.ps1 from an elevated PowerShell session. It requires the same Windows identity that owns the encrypted configuration. No service is installed or enabled by this panel.</p><p>Background collection cannot complete an interactive Microsoft sign-in. Sign in from the desktop before using unattended monitoring.</p></details>
+      </form>
     </div>
+    <div role="tabpanel" id="ops-pane-summaries" aria-labelledby="ops-tab-summaries" hidden>
+      <p class="ops-note">Capture off only locks this panel. Existing summary schedules are not changed.</p>
+      <fieldset id="ops-extras" class="ops-dependent" disabled inert aria-disabled="true"><legend class="ops-sr-only">Local summaries</legend>
+      <section id="ops-reports" class="ins-panel" aria-label="Local operational summaries"></section>
+      </fieldset>
+    </div>
+    <div role="tabpanel" id="ops-pane-health" aria-labelledby="ops-tab-health" hidden>
+      <fieldset id="ops-health" class="ops-dependent" disabled inert aria-disabled="true"><legend class="ops-sr-only">Health and service</legend>
+      <h3 id="ops-status-heading">Collector self-health</h3><div id="ops-status"></div><button type="button" class="btn ghost" id="ops-refresh">Refresh status</button>
+      <details id="ops-service"><summary>Optional Windows service (manual setup)</summary><p class="ops-note">Run the packaged Install-Service.ps1 from elevated PowerShell, using the Windows identity that owns the encrypted configuration. This panel never installs or enables a service.</p><p class="ops-note">Sign in from the desktop before unattended monitoring; background collection cannot complete interactive Microsoft sign-in.</p></details>
+      </fieldset>
+    </div>
+    </div>
+    <footer><p id="ops-feedback" role="status" aria-live="polite">Advanced changes require Save.</p><button type="submit" form="ops-form" class="btn" id="ops-save" disabled>Save advanced settings</button></footer>
   </section>`;
   document.body.append(backdrop);
   const read = id => backdrop.querySelector(`#${id}`);
-  const reports = initReportUi({ host: read('ops-reports'), fetchImpl });
-  let sequence = 0, busy = false, timer, returnFocus, settingsLoaded = false, retentionPending = null, capturePending = null;
+  const reports = initReportUi({ host: read('ops-reports'), fetchImpl, disabled: true });
+  let sequence = 0, busy = false, timer, returnFocus, settingsLoaded = false, retentionPending = null, capturePending = null, advancedPending = null;
+  let confirmedCapture = false, captureUnconfirmed = false;
+  const tabs = ['capture', 'summaries', 'health'];
   const removers = [];
   function listen(target, name, callback) { target.addEventListener(name, callback); removers.push(() => target.removeEventListener(name, callback)); }
   function feedback(text, error = false) { read('ops-feedback').textContent = text; read('ops-feedback').classList.toggle('ops-error', error); }
@@ -87,17 +111,52 @@ export function initOperationsUi({ fetchImpl = window.fetch.bind(window), onChan
   }
   function setBusy(value) {
     busy = value;
-    backdrop.querySelectorAll('input,select,button').forEach(node => { if (node.id !== 'ops-close') node.disabled = value; });
-    const saving = Boolean(retentionPending || capturePending);
-    const dependentDisabled = value || !settingsLoaded || saving || !read('ops-enabled').checked;
-    read('ops-options').disabled = dependentDisabled;
-    for (const id of ['ops-options', 'ops-extras']) {
+    const saving = Boolean(retentionPending || capturePending || advancedPending);
+    const dependentDisabled = value || !settingsLoaded || saving || captureUnconfirmed || !read('ops-enabled').checked;
+    for (const id of ['ops-options', 'ops-extras', 'ops-health']) {
+      read(id).disabled = dependentDisabled;
       read(id).inert = dependentDisabled;
       read(id).setAttribute('aria-disabled', String(dependentDisabled));
+      read(id).classList.toggle('ops-disabled', dependentDisabled);
     }
+    reports.setDisabled(dependentDisabled);
     read('ops-enabled').disabled = value || !settingsLoaded || saving;
     read('ops-retention').disabled = dependentDisabled;
     read('ops-save').disabled = dependentDisabled;
+    read('ops-availability').textContent = !settingsLoaded ? (value ? 'Loading settings. Options are locked.' : 'Settings unavailable. Reopen to retry; options are locked.') :
+      saving || value ? 'Saving / loading… Options are temporarily locked.' :
+      captureUnconfirmed ? 'Save not confirmed. Reopen settings to check; options remain locked.' :
+      !read('ops-enabled').checked ? 'Capture is off. All options below are locked; saved choices and schedules are unchanged.' :
+      'Backend must stay running and host awake. Paused servers stay paused. Notifications are independent.';
+  }
+  function selectTab(tab, focus = false) {
+    for (const name of tabs) {
+      const selected = name === tab;
+      read(`ops-tab-${name}`).setAttribute('aria-selected', String(selected));
+      read(`ops-tab-${name}`).tabIndex = selected ? 0 : -1;
+      read(`ops-pane-${name}`).hidden = !selected;
+    }
+    read('ops-save').hidden = tab !== 'capture';
+    if (tab === 'summaries') read('rpt-panel').open = true;
+    if (focus) read(`ops-tab-${tab}`).focus();
+  }
+  for (const tab of tabs) {
+    listen(read(`ops-tab-${tab}`), 'click', () => selectTab(tab));
+    listen(read(`ops-tab-${tab}`), 'keydown', event => {
+      let index = tabs.indexOf(tab);
+      if (event.key === 'ArrowRight') index = (index + 1) % tabs.length;
+      else if (event.key === 'ArrowLeft') index = (index + tabs.length - 1) % tabs.length;
+      else if (event.key === 'Home') index = 0;
+      else if (event.key === 'End') index = tabs.length - 1;
+      else return;
+      event.preventDefault(); selectTab(tabs[index], true);
+    });
+  }
+  for (const id of ['ops-interval', 'ops-concurrent', 'ops-inventory', 'ops-query-store', 'ops-buffer']) {
+    listen(read(id), 'change', () => {
+      if (busy || !settingsLoaded || !confirmedCapture || captureUnconfirmed) return;
+      feedback('Unsaved advanced changes. Choose Save advanced settings.');
+    });
   }
   async function refresh(guard = sequence) {
     try {
@@ -107,6 +166,7 @@ export function initOperationsUi({ fetchImpl = window.fetch.bind(window), onChan
   }
   function populate(settings) {
     read('ops-enabled').checked = settings.enabled;
+    confirmedCapture = settings.enabled; captureUnconfirmed = false;
     read('ops-interval').value = settings.intervalSeconds;
     read('ops-concurrent').value = settings.maxConcurrent;
     read('ops-inventory').value = settings.collection.inventoryIntervalSeconds;
@@ -118,9 +178,11 @@ export function initOperationsUi({ fetchImpl = window.fetch.bind(window), onChan
     returnFocus = document.activeElement;
     const guard = ++sequence;
     settingsLoaded = false;
-    backdrop.classList.add('show'); feedback(''); setBusy(true); read('ops-close').focus();
+    backdrop.classList.add('show'); selectTab('capture');
+    read('ops-capture-feedback').textContent = 'Loading saved capture setting…';
+    feedback('Advanced changes require Save.'); setBusy(true); read('ops-close').focus();
     try {
-      await Promise.all([retentionPending, capturePending]);
+      await Promise.all([retentionPending, capturePending, advancedPending]);
       if (guard !== sequence) return;
       const settings = await api('settings');
       if (guard !== sequence) return;
@@ -129,7 +191,12 @@ export function initOperationsUi({ fetchImpl = window.fetch.bind(window), onChan
       read('ops-retention-feedback').textContent = `Saved retention: ${settings.history.retentionDays} days. Changes save automatically when you finish editing.`;
       await refresh(guard);
       clearInterval(timer); timer = setInterval(() => { if (!busy) void refresh(guard); }, 15000);
-    } catch (error) { if (guard === sequence) feedback(error.message, true); }
+    } catch (error) {
+      if (guard === sequence) {
+        feedback(error.message, true);
+        read('ops-capture-feedback').textContent = 'Saved capture state unavailable. Reopen settings to retry.';
+      }
+    }
     finally { if (guard === sequence) setBusy(false); }
   }
   function close() { ++sequence; clearInterval(timer); backdrop.classList.remove('show'); returnFocus?.focus(); }
@@ -145,9 +212,14 @@ export function initOperationsUi({ fetchImpl = window.fetch.bind(window), onChan
         if (guard !== sequence) return;
         if (settings.enabled !== enabled) throw new Error('The dashboard did not confirm the selected capture setting.');
         read('ops-enabled').checked = settings.enabled;
+        confirmedCapture = settings.enabled; captureUnconfirmed = false;
         read('ops-capture-feedback').textContent = `Saved: background capture ${enabled ? 'on' : 'off'}.`;
       } catch (error) {
-        if (guard === sequence) read('ops-capture-feedback').textContent = `Capture save not confirmed: ${error.message} Reopen settings to check before retrying.`;
+        if (guard === sequence) {
+          read('ops-enabled').checked = confirmedCapture;
+          captureUnconfirmed = true;
+          read('ops-capture-feedback').textContent = `Capture save not confirmed: ${error.message} Reopen settings to check before retrying.`;
+        }
       } finally {
         capturePending = null;
         if (guard === sequence) setBusy(busy);
@@ -157,7 +229,7 @@ export function initOperationsUi({ fetchImpl = window.fetch.bind(window), onChan
     return capturePending;
   });
   listen(read('ops-retention'), 'change', () => {
-    if (busy || !settingsLoaded || retentionPending || capturePending || !read('ops-enabled').checked) return;
+    if (busy || !settingsLoaded || retentionPending || capturePending || captureUnconfirmed || !read('ops-enabled').checked) return;
     const days = Number(read('ops-retention').value);
     if (!Number.isInteger(days) || days < 1 || days > 90) {
       read('ops-retention-feedback').textContent = 'Not saved. Enter a whole number from 1 to 90 days.';
@@ -184,25 +256,29 @@ export function initOperationsUi({ fetchImpl = window.fetch.bind(window), onChan
     setBusy(busy);
     return retentionPending;
   });
-  listen(read('ops-form'), 'submit', async event => {
+  listen(read('ops-form'), 'submit', event => {
     event.preventDefault();
-    if (busy || retentionPending || capturePending || !settingsLoaded || !read('ops-enabled').checked) return;
+    if (busy || retentionPending || capturePending || !settingsLoaded || captureUnconfirmed || !read('ops-enabled').checked) return;
     const guard = sequence;
     setBusy(true); feedback('');
-    try {
-      const settings = await api('settings', operationsPayload(read));
-      if (guard !== sequence) return;
-      populate(settings); feedback('Monitoring settings saved. Email approval and delivery settings are unchanged.');
-      read('ops-capture-feedback').textContent = `Saved: background capture ${settings.enabled ? 'on' : 'off'}.`;
-      read('ops-retention-feedback').textContent = `Saved: ${settings.history.retentionDays} days. Expired history is purged automatically.`;
-      await onChanged(settings); await refresh(guard);
-    } catch (error) { if (guard === sequence) feedback(error.message, true); }
-    finally { if (guard === sequence) setBusy(false); }
+    advancedPending = (async () => {
+      try {
+        const { intervalSeconds, maxConcurrent, collection } = operationsPayload(read);
+        const settings = await api('settings', { intervalSeconds, maxConcurrent, collection });
+        if (guard !== sequence) return;
+        populate(settings); feedback('Advanced settings saved. Notifications and summary schedules are unchanged.');
+        read('ops-capture-feedback').textContent = `Saved: background capture ${settings.enabled ? 'on' : 'off'}.`;
+        read('ops-retention-feedback').textContent = `Saved: ${settings.history.retentionDays} days. Expired history is purged automatically.`;
+        await onChanged(settings); await refresh(guard);
+      } catch (error) { if (guard === sequence) feedback(`Advanced save not confirmed: ${error.message}`, true); }
+      finally { advancedPending = null; if (guard === sequence) setBusy(false); }
+    })();
+    return advancedPending;
   });
   listen(backdrop, 'keydown', event => {
     if (event.key === 'Escape') close();
     if (event.key !== 'Tab') return;
-    const nodes = [...backdrop.querySelectorAll('button,input,select,summary')].filter(node => !node.disabled && !node.closest('[inert]') && node.getClientRects().length);
+    const nodes = [...backdrop.querySelectorAll('button,input,select,summary')].filter(node => !node.disabled && node.tabIndex !== -1 && !node.closest('[inert]') && node.getClientRects().length);
     const first = nodes[0], last = nodes[nodes.length-1];
     if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
     else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }

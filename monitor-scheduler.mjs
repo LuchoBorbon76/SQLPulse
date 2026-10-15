@@ -17,6 +17,7 @@ export function createMonitorScheduler({
   loadServers, collect, health = () => ({ level: 'unknown', label: 'Unknown', critical: [], warning: [] }),
   now = Date.now, intervalSeconds = 60, maxConcurrent = 2, onSample, onError,
   setTimer = setTimeout, clearTimer = clearTimeout, redactError = () => 'Collection failed; see server details',
+  canCollect = () => true,
 } = {}) {
   const samples = new Map(), pending = new Map(), generations = new Map(), trends = new Map();
   const limited = createAsyncLimiter(maxConcurrent);
@@ -43,6 +44,7 @@ export function createMonitorScheduler({
     callbacks.add(pending);
   }
   function acceptSample(server, data) {
+    if (!canCollect()) return;
     const identity = configIdentity(server), previous = samples.get(server.id);
     if (previous?.identity === identity && previous.data === data && !previous.error) return;
     if (previous?.identity === identity && data?.generated_at &&
@@ -63,7 +65,7 @@ export function createMonitorScheduler({
     trends.delete(id);
   }
   function enqueue(server, force) {
-    if (server.monitoringPaused) return;
+    if (server.monitoringPaused || !canCollect()) return;
     const identity = configIdentity(server), sample = samples.get(server.id);
     const age = now() - (sample?.attemptedAt ?? -Infinity);
     if (pending.has(server.id) || (sample?.identity === identity && age < (force ? 15000 : 30000))) return;
@@ -71,7 +73,7 @@ export function createMonitorScheduler({
     const job = { server, identity, generation: generations.get(server.id) };
     pending.set(server.id, job);
     job.promise = limited(async () => {
-      if (stopped || !currentJob(job) || servers.find(item => item.id === server.id)?.monitoringPaused) return;
+      if (stopped || !canCollect() || !currentJob(job) || servers.find(item => item.id === server.id)?.monitoringPaused) return;
       job.started = true;
       job.startedAt = now();
       try {
@@ -79,7 +81,7 @@ export function createMonitorScheduler({
         completed++;
         if (currentJob(job)) acceptSample(server, data);
       } catch (error) {
-        if (!currentJob(job) || servers.find(item => item.id === server.id)?.monitoringPaused || error.monitoringPaused) return;
+        if (!canCollect() || !currentJob(job) || servers.find(item => item.id === server.id)?.monitoringPaused || error.monitoringPaused || error.azureRequired) return;
         failed++;
         const old = samples.get(server.id);
         samples.set(server.id, {
@@ -134,7 +136,7 @@ export function createMonitorScheduler({
   function arm() {
     if (timer) clearTimer(timer);
     timer = undefined;
-    if (stopped || (!enabled && now() >= viewingUntil)) return;
+    if (stopped || !canCollect() || (!enabled && now() >= viewingUntil)) return;
     const delay = (enabled ? interval : 30) * 1000;
     timer = setTimer(() => {
       timer = undefined;
@@ -174,7 +176,7 @@ export function createMonitorScheduler({
           critical: Array.isArray(result.critical) ? result.critical.length : number(result.critical) ?? 0,
           warning: Array.isArray(result.warning) ? result.warning.length : number(result.warning) ?? 0,
         };
-        const status = server.monitoringPaused ? 'paused' : valid && sample.error ? (data ? 'stale' : 'error')
+        const status = !canCollect() ? 'registration-required' : server.monitoringPaused ? 'paused' : valid && sample.error ? (data ? 'stale' : 'error')
           : !data ? 'loading' : now() - sample.at >= (enabled ? interval : 30) * 2000 ? 'stale' : 'ok';
         return {
           id: server.id, name: server.name, group: server.group || null, server: server.server,

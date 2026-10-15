@@ -133,7 +133,7 @@ export function createCollectorCache(collect, {
       }
       return data;
     }, error => {
-      if ((generations.get(id) || 0) === generation && latestRequests.get(id) === request && !error?.monitoringPaused) {
+      if ((generations.get(id) || 0) === generation && latestRequests.get(id) === request && !error?.monitoringPaused && !error?.azureRequired) {
         failures.set(id, { identity, at: now(), error });
       }
       throw error;

@@ -354,6 +354,11 @@ tr.clickable:hover td:first-child{border-left:3px solid var(--cp-accent);padding
 </style>
 </head>
 <body>
+<div id="azure-prerequisite-banner" role="status" style="position:sticky;top:0;z-index:100;background:#533f12;color:#fff;padding:12px;text-align:center">
+  <span id="azure-prerequisite-message">Checking Azure SQL connectivity. Live monitoring is locked until a registered Azure SQL Database or Managed Instance is recently reachable.</span>
+  <button type="button" id="azure-prerequisite-add" class="btn">Add Azure connection</button>
+  <button type="button" id="azure-prerequisite-check" class="btn">Check again</button>
+</div>
 <div class="layout">
   <aside class="sidebar">
     <div>
@@ -752,6 +757,35 @@ let servers = [];
 let activeServerId = null;
 let dashboardView = 'overview';
 let dashboardStarted = false;
+let azureReadiness = { eligible: false, reason: 'checking' };
+let readinessRequest;
+async function pollAzureReadiness(){
+  if (readinessRequest) return readinessRequest;
+  readinessRequest = (async () => {
+    const wasEligible = azureReadiness.eligible;
+    try {
+      const response = await fetch('/api/azure-readiness', { cache: 'no-store', signal: AbortSignal.timeout(10000) });
+      if (!response.ok) throw new Error('Readiness unavailable');
+      azureReadiness = await response.json();
+    } catch { azureReadiness = { eligible: false, reason: 'unknown' }; }
+    el('azure-prerequisite-banner').hidden = azureReadiness.eligible === true;
+    const reasons = {
+      'registration-required': 'Register at least one Azure SQL Database or Managed Instance to enable live monitoring. SQL Server connections can still be added and tested.',
+      checking: 'Checking registered Azure SQL connectivity. Live monitoring remains locked until a recent connection check succeeds.',
+    };
+    el('azure-prerequisite-message').textContent = reasons[azureReadiness.reason] ||
+      'No registered Azure SQL connection has a recent successful check. Live monitoring is locked. Check authorization, VPN, network and SQL access; this does not prove an Azure service outage. Automatic checks continue.';
+    if (!azureReadiness.eligible) {
+      fleetUI?.stop();
+      cancelDetailRequests();
+      setStatus('paused', 'Azure connectivity prerequisite · live monitoring locked');
+    }
+    updateDetailActions();
+    updatePauseControls();
+    if (!wasEligible && azureReadiness.eligible && dashboardStarted && !historyController?.isHistorical() && !currentViewPaused()) refreshCurrentView();
+  })().finally(() => { readinessRequest = null; });
+  return readinessRequest;
+}
 let detailGeneration = 0;
 let fleetUI, fleetHelpers;
 const metricsInFlight = new Map();
@@ -759,6 +793,7 @@ let paused = false;
 const pauseUpdates = new Set();
 const pauseRevisions = new Map();
 function currentViewPaused(){
+  if (!azureReadiness.eligible) return true;
   return dashboardView === 'overview' ? paused : servers.find(server => server.id === activeServerId)?.monitoringPaused === true;
 }
 function updatePauseControls(){
@@ -769,7 +804,7 @@ function updatePauseControls(){
   if (spans[1]) spans[1].textContent = overview ? stopped ? 'Resume view' : 'Pause view' : stopped ? 'Resume server' : 'Pause server';
   button.title = overview ? 'Pause only this browser view; background monitoring and server pause states are unchanged' :
     `${stopped ? 'Resume' : 'Pause'} monitoring only for ${server?.name || 'the selected server'}; keep its last sample`;
-  button.disabled = !overview && (!server || pauseUpdates.has(server.id));
+  button.disabled = !azureReadiness.eligible || (!overview && (!server || pauseUpdates.has(server.id)));
   button.setAttribute('aria-pressed', String(stopped));
   el('refresh-btn').textContent = !overview && stopped ? 'Read cached sample' : 'Refresh now';
   el('refresh-btn').title = !overview && stopped
@@ -812,6 +847,13 @@ function invalidateClientMetrics(id){
 }
 
 const el = (id) => document.getElementById(id);
+el('azure-prerequisite-add').addEventListener('click', () => {
+  el('add-server-btn').click();
+  el('f-target-type').value = 'azure-sqldb';
+  el('f-target-type').dispatchEvent(new Event('change'));
+});
+el('azure-prerequisite-check').addEventListener('click', () => void pollAzureReadiness());
+setInterval(() => void pollAzureReadiness(), 15000);
 let sharedComputeHealth;
 const healthReady = import('/health.js').then(module => {
   sharedComputeHealth = module.computeHealth;
@@ -1901,7 +1943,7 @@ function cancelDetailRequests(){
   }
 }
 function refreshCurrentView(){
-  if (!dashboardStarted || document.hidden) return;
+  if (!dashboardStarted || document.hidden || !azureReadiness.eligible) return;
   if (dashboardView === 'overview') return fleetUI?.start(!paused);
   return fetchMetrics(true);
 }
@@ -1935,7 +1977,7 @@ function setDashboardView(view){
     el('current-server-sub').textContent = `${servers.length} configured servers · lightweight samples`;
     renderFleetHealth(fleetHelpers.summarizeFleet(servers.map(server => fleetUI.getServer(server.id) || server)));
     if (paused) setStatus('paused', 'View paused · background monitoring unchanged');
-    if (!document.hidden && !paused && dashboardStarted) fleetUI.start(true);
+    if (!document.hidden && !paused && dashboardStarted && azureReadiness.eligible) fleetUI.start(true);
   } else fleetUI?.stop();
   updateDetailActions();
   updatePauseControls();
@@ -1945,10 +1987,10 @@ function updateDetailActions(DATA){
   const currentData = arguments.length ? DATA : serverState.get(activeServerId)?.data;
   const historical = historyController?.isHistorical() === true;
   const usable = !historical && dashboardView === 'detail' && !!currentData && !serverState.get(activeServerId)?.lastError;
-  el('refresh-btn').disabled = historical;
-  el('pause-btn').disabled = historical;
-  el('interval-sel').disabled = historical;
-  if (historical) el('countdown').textContent = '—';
+  el('refresh-btn').disabled = historical || !azureReadiness.eligible;
+  el('pause-btn').disabled = historical || !azureReadiness.eligible;
+  el('interval-sel').disabled = historical || !azureReadiness.eligible;
+  if (historical || !azureReadiness.eligible) el('countdown').textContent = '—';
   el('counters-btn').disabled = historical || !countersController || dashboardView !== 'detail' || !activeServerId;
   el('counters-btn').hidden = dashboardView !== 'detail';
   el('snapshot-btn').hidden = dashboardView !== 'detail';
@@ -2071,6 +2113,7 @@ function delta(cur, prev, invert=false){
 }
 
 function fetchMetrics(){
+  if (!azureReadiness.eligible) return Promise.resolve();
   if (historyController?.isHistorical()) return;
   if(dashboardView !== 'detail' || document.hidden || !activeServerId || !servers.some(s => s.id === activeServerId)) return;
   if (pauseUpdates.has(activeServerId) || (currentViewPaused() && arguments[0] !== true)) return;
@@ -2103,6 +2146,7 @@ function fetchMetrics(){
       applyServerPause(requestedId, data.monitoringPaused);
     }
     if(!r.ok) {
+      if (data.azureRequired) { void pollAzureReadiness(); return; }
       if (data.monitoringPaused || servers.find(server => server.id === requestedId)?.monitoringPaused) return;
       throw new Error(data.error||('HTTP '+r.status));
     }
@@ -3179,6 +3223,7 @@ setInterval(()=>{
   setStatus('paused','Review the usage disclaimer');
   await (await disclaimerReady).ensureAcknowledged();
   await loadServers();
+  await pollAzureReadiness();
   dashboardStarted = true;
   setDashboardView('overview');
 })().catch(error => showRegistryError('Initialization failed', error));

@@ -21,6 +21,7 @@ import { createAiPreviewStore } from './ai-preview.mjs';
 import { sqlcmdPaths } from './sqlcmd-paths.mjs';
 import { classifySqlEndpoint } from './sql-endpoint.js';
 import { createAzureSqlAuth } from './azure-sql-auth.mjs';
+import { createAzurePrerequisite } from './azure-prerequisite.mjs';
 import { createConnectionProgress, connectionAbortError, throwIfConnectionAborted, commitConnection, connectionSignInOptions } from './connection-progress.mjs';
 import { buildSqlcmdArgs, validateConnectionConfig, sqlcmdEnvironment, sqlcmdFailure, redactSqlDiagnostic, sqlExecutionBudget, runSqlReadWithRetry } from './sqlcmd-options.mjs';
 
@@ -186,7 +187,9 @@ async function loadServers() {
 }
 async function updateServers(mutator) {
   await initializeRegistry();
-  return serverStore.update(mutator);
+  const result = await serverStore.update(mutator);
+  azurePrerequisite.reconcile(await serverStore.read());
+  return result;
 }
 function requestError(status, message) {
   return Object.assign(new Error(message), { status });
@@ -548,15 +551,38 @@ SELECT JSON_QUERY(@topq) AS top_queries FOR JSON PATH, WITHOUT_ARRAY_WRAPPER;
 // ---------- Collector ----------
 const sqlProcessLimiter = createAsyncLimiter(2);
 const sectionCollector = createSectionCache();
+const prerequisiteExemptTags = new Set(['test', 'engine', 'dblist', 'readiness']);
+const azurePrerequisite = createAzurePrerequisite({
+  getServers: loadServers,
+  probe: async (stored, { signal }) => {
+    const cfg = await resolveServer(stored);
+    const raw = await runSqlcmdOutput(cfg, 'SET NOCOUNT ON; SELECT 1;', 'readiness',
+      ['-l', '30', '-t', '10', '-h', '-1', '-W'], 45000, { signal, allowLogin: false });
+    return raw.trim() === '1';
+  },
+  onChange: () => shutdownController.signal.aborted ? undefined : configureMonitoring(),
+});
+async function requireAzurePrerequisite(expectedGeneration) {
+  const status = azurePrerequisite.reconcile(await loadServers());
+  if (!status.eligible || (expectedGeneration !== undefined && expectedGeneration !== status.generation)) {
+    throw Object.assign(requestError(409, 'Live monitoring requires a registered, recently reachable Azure SQL Database or Managed Instance. Review Azure connectivity.'), {
+      azureRequired: true, azureReadiness: status,
+    });
+  }
+  return status.generation;
+}
 async function runSqlcmdOutput(cfg, sql, tag, extraArgs, timeoutMs, options = {}) {
+  const readinessGeneration = prerequisiteExemptTags.has(tag) ? undefined : await requireAzurePrerequisite();
   const signal = options.signal ? AbortSignal.any([options.signal, shutdownController.signal]) : shutdownController.signal;
   validateConnectionConfig(cfg, { requireDatabase: false });
-  return runSqlReadWithRetry(cfg, tag, attempt => runSqlcmdAttempt(cfg, sql, tag, extraArgs, timeoutMs, {
-    ...options, signal, forceLogin: attempt === 0 && options.forceLogin === true,
+  const result = await runSqlReadWithRetry(cfg, tag, attempt => runSqlcmdAttempt(cfg, sql, tag, extraArgs, timeoutMs, {
+    ...options, signal, readinessGeneration, forceLogin: attempt === 0 && options.forceLogin === true,
   }), {
     signal, onProgress: options.onProgress,
     onRetry: category => console.error(`Azure SQL ${tag}: ${category}; retrying the built-in read once after 5 seconds with a new connection.`),
   });
+  if (!prerequisiteExemptTags.has(tag)) await requireAzurePrerequisite(readinessGeneration);
+  return result;
 }
 async function runSqlcmdAttempt(cfg, sql, tag, extraArgs, timeoutMs, options = {}) {
   options = { ...options, signal: options.signal
@@ -570,6 +596,7 @@ async function runSqlcmdAttempt(cfg, sql, tag, extraArgs, timeoutMs, options = {
     await writeFile(sqlFile, sql, 'utf8');
     return await sqlProcessLimiter(() => azureSqlAuth.withSession(cfg, async session => {
       throwIfConnectionAborted(options.signal);
+      if (!prerequisiteExemptTags.has(tag)) await requireAzurePrerequisite(options.readinessGeneration);
       options.onProgress?.({ phase: 'connecting' });
       const budget = sqlExecutionBudget(cfg, extraArgs, timeoutMs);
       const args = buildSqlcmdArgs(cfg, [...budget.args, '-i', sqlFile, '-o', outFile]);
@@ -749,6 +776,7 @@ async function testConnection(cfg, options = {}) {
 // ---------- Cache per server ----------
 const CACHE_MS = 30000;
 const metricsCollector = createCollectorCache(async stored => {
+  const readinessGeneration = await requireAzurePrerequisite();
   const current = findServer(await loadServers(), stored.id);
   if (configIdentity(current) !== configIdentity(stored)) throw requestError(409, 'Server configuration changed; refresh and retry');
   if (current.monitoringPaused) throw Object.assign(requestError(409, 'Monitoring is paused for this server'), { monitoringPaused: true });
@@ -758,6 +786,7 @@ const metricsCollector = createCollectorCache(async stored => {
     throw Object.assign(requestError(409, 'Monitoring is paused for this server'), { monitoringPaused: true });
   }
   const data = await collectFor(cfg, (await monitorOperations.settings()).collection);
+  await requireAzurePrerequisite(readinessGeneration);
   // Re-read under the registry lock; never save a collection's old snapshot.
   const persistEdition = cfg.engineEdition && cfg.engineEdition !== current.engineEdition;
   const verifyCurrent = list => {
@@ -767,6 +796,7 @@ const metricsCollector = createCollectorCache(async stored => {
   };
   if (persistEdition) await updateServers(verifyCurrent);
   else verifyCurrent(await loadServers());
+  await requireAzurePrerequisite(readinessGeneration);
   try {
     await appendHistory(cfg.id, data);
     delete storageErrors[`history:${cfg.id}`];
@@ -779,6 +809,7 @@ const metricsCollector = createCollectorCache(async stored => {
 }, { defaultMaxAgeMs: CACHE_MS });
 
 async function getMetricsFor(cfgStored, maxAgeMs = CACHE_MS) {
+  const readinessGeneration = await requireAzurePrerequisite();
   const current = findServer(await loadServers(), cfgStored.id);
   if (configIdentity(current) !== configIdentity(cfgStored)) throw requestError(409, 'Server configuration changed; refresh and retry');
   if (current.monitoringPaused) {
@@ -787,6 +818,7 @@ async function getMetricsFor(cfgStored, maxAgeMs = CACHE_MS) {
     return { ...cached.data, monitoringPaused: true };
   }
   const data = await metricsCollector.get(current, maxAgeMs);
+  await requireAzurePrerequisite(readinessGeneration);
   const latest = findServer(await loadServers(), current.id);
   if (configIdentity(latest) !== configIdentity(current)) throw requestError(409, 'Server configuration changed during collection');
   if (metricsCollector.peek(latest)?.data === data) monitor.acceptSample(latest, data);
@@ -829,8 +861,9 @@ const emailAlerts = createAlertService({
   onDeliveryWarning: status => console.error(`Email delivery: ${status.message}`),
 });
 async function observeEmail(server, data, options) {
-  if (!emailMonitoringEnabled || shutdownController.signal.aborted) return;
+  if (!emailMonitoringEnabled || shutdownController.signal.aborted || options?.error?.azureRequired) return;
   try {
+    await requireAzurePrerequisite();
     const latest = (await loadServers()).find(item => item.id === server.id);
     if (!latest || latest.monitoringPaused || options?.error?.monitoringPaused) return;
     await emailAlerts.observe(latest, data, options);
@@ -840,11 +873,14 @@ async function observeEmail(server, data, options) {
 }
 const monitor = createMonitorScheduler({
   loadServers, collect: getMetricsFor, health: computeHealth,
+  canCollect: () => azurePrerequisite.status().eligible,
   onSample: async (server, data) => {
     if (shutdownController.signal.aborted) return;
+    if (!azurePrerequisite.status().eligible) return;
     await observeEmail(server, data);
     try {
       const latest = findServer(await loadServers(), server.id);
+      if (!azurePrerequisite.reconcile(await loadServers()).eligible) return;
       if (latest.monitoringPaused || connectionIdentity(latest) !== connectionIdentity(server)) return;
       await incidents.observe(latest, data);
       if (!incidentJobs.has(server.id)) {
@@ -868,7 +904,7 @@ async function configureMonitoring() {
   sqlProcessLimiter.configure(settings.maxConcurrent);
   await historical.configure(settings.history);
   monitor.configure({
-    enabled: settings.enabled || emailMonitoringEnabled,
+    enabled: azurePrerequisite.status().eligible && (settings.enabled || emailMonitoringEnabled),
     intervalSeconds: settings.enabled && emailMonitoringEnabled ? Math.min(settings.intervalSeconds, emailMonitoringInterval)
       : settings.enabled ? settings.intervalSeconds : emailMonitoringInterval,
     maxConcurrent: settings.maxConcurrent,
@@ -1140,6 +1176,13 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if ((p === '/api/azure-readiness' || p === '/api/registration/status') && req.method === 'GET') {
+      const status = azurePrerequisite.reconcile(await loadServers());
+      void azurePrerequisite.tick();
+      return json(res, 200, status);
+    }
+    if (['/api/query-detail', '/api/live-plan', '/api/kill-session', '/api/diagnostics/collect'].includes(p) ||
+        /^\/api\/servers\/[^/]+\/counters\/test$/.test(p)) await requireAzurePrerequisite();
     if (p === '/api/servers' && req.method === 'GET') {
       const list = await loadServers();
       return json(res, 200, list.map(publicView));
@@ -1235,6 +1278,7 @@ const server = http.createServer(async (req, res) => {
       }
     }
     if (p === '/api/overview' && req.method === 'GET') {
+      await requireAzurePrerequisite();
       monitor.requestRefresh(undefined, { viewing: true, force: url.searchParams.get('refresh') === '1' });
       return json(res, 200, await monitor.snapshot());
     }
@@ -1256,7 +1300,7 @@ const server = http.createServer(async (req, res) => {
       });
       // Reconcile pause state without invalidating the last sample or connection.
       const overview = await monitor.snapshot();
-      if (!updated.monitoringPaused) await monitor.requestRefresh([id], { force: true });
+      if (!updated.monitoringPaused && azurePrerequisite.status().eligible) await monitor.requestRefresh([id], { force: true });
       return json(res, 200, {
         ...publicView(updated),
         collecting: overview.servers.find(server => server.id === id)?.collecting === true,
@@ -1448,6 +1492,7 @@ SELECT (SELECT name FROM sys.databases WHERE database_id > 4 AND state_desc='ONL
     }
 
     if (p === '/api/metrics' && req.method === 'GET') {
+      await requireAzurePrerequisite();
       const id = url.searchParams.get('serverId');
       const list = await loadServers();
       const cfgStored = id ? list.find(s => s.id === id) : list[0];
@@ -1727,7 +1772,9 @@ SELECT CAST(query_plan AS NVARCHAR(MAX)) AS xml_plan FROM sys.dm_exec_query_plan
     const emailAuthStatus = String(req.url || '').startsWith('/api/alerts/microsoft/') &&
       ['EAUTH', 'MICROSOFT_AUTH_REQUIRED', 'MICROSOFT_AUTH_CHANGED'].includes(e.code)
       ? e.code === 'MICROSOFT_AUTH_CHANGED' ? 409 : 400 : null;
-    if (!res.writableEnded && !res.destroyed) json(res, e.status || emailAuthStatus || (e.aiSafe ? 400 : 500), { error: message });
+    if (!res.writableEnded && !res.destroyed) json(res, e.status || emailAuthStatus || (e.aiSafe ? 400 : 500), {
+      error: message, ...(e.azureRequired ? { azureRequired: true, azureReadiness: e.azureReadiness } : {}),
+    });
   }
 });
 
@@ -1760,10 +1807,12 @@ async function operationsStatus() {
     sqlProcesses: sqlProcessLimiter.stats(), collector: metricsCollector.stats(),
     pendingDiagnostics: incidentJobs.size,
     maintenance: maintenanceSummary,
+    azureReadiness: azurePrerequisite.status(),
   };
 }
 server.listen(PORT, '127.0.0.1', async () => {
   console.log(`SQL Pulse listening on http://127.0.0.1:${server.address().port}`);
+  azurePrerequisite.start();
   try {
     const settings = await emailAlerts.settings();
     emailMonitoringEnabled = settings.enabled;
@@ -1789,11 +1838,13 @@ function scheduleShutdown() {
   stopping = true;
   monitor.stop();
   shutdownController.abort(new Error('SQL Pulse is shutting down'));
+  azurePrerequisite.stop();
   const timeout = setTimeout(() => process.exit(1), 30000);
   timeout.unref();
   setTimeout(async () => {
     const closing = Promise.allSettled([emailAlerts.close(), microsoftEmailAuth.close(), ai.close(), operationalInsights.close()]);
     await metricsCollector.idle();
+    await azurePrerequisite.idle();
     await monitor.idle();
     const results = [...await closing, ...await Promise.allSettled([incidents.close(), ...incidentJobs.values(), maintenanceJob])];
     for (const result of results) if (result.status === 'rejected') console.error('Service cleanup failed:', redactSqlDiagnostic(result.reason?.message || 'Cleanup failed'));
@@ -1805,6 +1856,7 @@ server.on('close', () => {
   clearInterval(heartbeatTimer);
   clearInterval(maintenanceTimer);
   monitor.stop();
+  azurePrerequisite.stop();
   operationalInsights.close().catch(() => console.error('Local report cleanup failed.'));
   emailMonitoringEnabled = false;
   if (stopping) return;

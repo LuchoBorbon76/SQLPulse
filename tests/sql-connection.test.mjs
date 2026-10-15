@@ -11,6 +11,7 @@ import http from 'node:http';
 import { createJsonStore, validateServerRegistry } from '../storage.mjs';
 import { createCollectorCache, createAsyncLimiter, createSectionCache, configIdentity, connectionIdentity } from '../collector-cache.mjs';
 import { createMonitorScheduler } from '../monitor-scheduler.mjs';
+import { createAzurePrerequisite } from '../azure-prerequisite.mjs';
 import { computeHealth } from '../health.js';
 import { normalizeCounter, validateCounterSql } from '../counters.mjs';
 import { createAlertService } from '../alerts.mjs';
@@ -51,6 +52,44 @@ const deferred = () => {
   return { promise, resolve };
 };
 const tick = () => new Promise(resolve => setImmediate(resolve));
+
+test('registered Azure readiness uses mocked SELECT 1, recovers independently and gates every live SQL pipeline', async t => {
+  let readiness, reachable = true, time = Date.now();
+  const fixture = await serverFixture(t, {
+    createAzurePrerequisite: options => {
+      readiness = createAzurePrerequisite({ ...options, now: () => time,
+        probe: (...args) => reachable ? options.probe(...args) : Promise.reject(new Error('Fixture authorization failure')) });
+      return readiness;
+    },
+  });
+  t.after(async () => { readiness.stop(); await readiness.idle(); });
+  await fixture.updateServers(list => {
+    list.push(cfg({ server: 'fixture.invalid', engineEdition: 3 }));
+    list.push(cfg({ id: 'mi', server: 'custom-mi.invalid', connectionType: 'azure-mi', engineEdition: 8, monitoringPaused: true }));
+  });
+  assert.equal((await fixture.request('/api/metrics?serverId=one', 'GET')).status, 409);
+  readiness.start(); await readiness.idle(); await tick();
+  assert.equal(readiness.status().eligible, true);
+  const calls = fixture.calls.filter(call => call.sql === 'SET NOCOUNT ON; SELECT 1;');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].args[calls[0].args.indexOf('-l') + 1], '30');
+  assert.ok(fixture.calls.some(call => call.options?.allowLogin === false));
+  assert.equal((await fixture.request('/api/metrics?serverId=one', 'GET')).status, 200);
+  const registered = (await fixture.loadServers()).find(server => server.id === 'mi');
+  assert.equal(registered.monitoringPaused, true);
+  reachable = false; time += 60000;
+  await readiness.tick(); await readiness.idle(); await tick();
+  assert.equal(readiness.status().eligible, false);
+  await assert.rejects(fixture.runSqlcmdOutput(cfg(), 'SELECT 1;', 'detail', [], 100),
+    error => error.azureRequired && error.status === 409);
+  assert.equal((await fixture.request('/api/metrics?serverId=one', 'GET')).status, 409);
+  reachable = true; time += 60000;
+  await readiness.tick(); await readiness.idle(); await tick();
+  assert.equal(readiness.status().eligible, true);
+  await fixture.updateServers(list => list.filter(server => server.id !== 'mi'));
+  assert.equal(readiness.status().reason, 'registration-required');
+  assert.equal((await fixture.request('/api/overview?refresh=1', 'GET')).status, 409);
+});
 function section(start, end) {
   const first = source.indexOf(start), last = source.indexOf(end, first + start.length);
   assert.ok(first >= 0 && last > first, start);
@@ -65,6 +104,11 @@ async function serverFixture(t, overrides = {}) {
     SERVERS_FILE: path.join(directory, 'servers.json'), TMP_DIR: directory,
     createJsonStore, validateServerRegistry, createCollectorCache, configIdentity, connectionIdentity,
     createAsyncLimiter, createSectionCache, createMonitorScheduler, computeHealth,
+    // These legacy SQL pipeline fixtures test execution under an already satisfied gate.
+    createAzurePrerequisite: () => ({
+      status: () => ({ eligible: true, generation: 1 }),
+      reconcile: () => ({ eligible: true, generation: 1 }), tick: async () => {},
+    }),
     createAlertService: options => ({ ...createAlertService(options), removeServer: async () => {} }),
     createMicrosoftEmailAuth: () => ({ settings: async () => ({ clientId: '', tenant: 'consumers', authenticated: false, username: '', revision: 0 }) }),
     DATA_DIR: directory,

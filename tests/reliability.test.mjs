@@ -83,6 +83,8 @@ async function serverFixture(t, overrides = {}) {
   const file = path.join(directory, 'servers.json');
   const context = {
     SERVERS_FILE: file, createJsonStore, validateServerRegistry, createCollectorCache, configIdentity, connectionIdentity,
+    azurePrerequisite: { status: () => ({ eligible: true }), reconcile: () => ({ eligible: true }), tick: async () => {} },
+    requireAzurePrerequisite: async () => 1,
     createMonitorScheduler, computeHealth, sectionCollector: createSectionCache(),
     createMicrosoftEmailAuth: () => ({ settings: async () => ({ clientId: '', tenant: 'consumers', authenticated: false, username: '', revision: 0 }) }),
     createAlertService: options => ({ ...createAlertService(options), removeServer: async () => {} }),
@@ -510,6 +512,8 @@ test('SQL subprocess executions use unique files and promptly clean success and 
   const paths = [];
   const context = {
     TMP_DIR: directory, mkdtemp, path, writeFile, readFile, rm,
+    prerequisiteExemptTags: new Set(['test', 'engine', 'dblist', 'readiness']),
+    requireAzurePrerequisite: async () => 1,
     shutdownController: new AbortController(), AbortSignal,
     sqlProcessLimiter: createAsyncLimiter(2),
     buildSqlcmdArgs: (cfg, args) => args, pickSqlcmd: () => 'mock-sqlcmd',
@@ -563,6 +567,7 @@ function clientFixture() {
     function setDashboardView(view) { dashboardView = view; }
     servers = [{id:'one'}, {id:'two'}];
     dashboardView = 'detail';
+    azureReadiness = { eligible: true, reason: 'ready' };
     globalThis.client = {
       select: id => { activeServerId = id; return fetchMetrics(); },
       refresh: fetchMetrics, switchTo: setActiveServer, invalidate: invalidateClientMetrics,

@@ -4,6 +4,10 @@
 
 Created by **Luis Fernando Borbon** · MIT License
 
+**Live monitoring prerequisite:** register at least one **Azure SQL Database or Azure SQL Managed Instance**, and keep at least one registered Azure connection recently reachable from the SQL Pulse host. SQL Server-only registration is insufficient. Until this requirement is met, a persistent banner locks live dashboard refresh/countdown, collection, counters and current SQL diagnostics/actions for **all** connections. Adding, editing and testing SQL Server/Azure connections, historical investigation, reports and local AI settings remain available. This is an application prerequisite, not a license check or a request to create cloud resources.
+
+An independent, bounded `SELECT 1` readiness loop checks registered Azure connections approximately every 60 seconds (including paused connections), with a 55-second execution budget and 120-second success freshness. Cold start, changed credentials/endpoints, stale evidence, or all failed checks lock monitoring; one fresh successful check unlocks it automatically. A paused connection is never automatically resumed. The loop shares the SQL process/authentication budget, uses existing saved credentials and cached non-interactive Entra authorization, and never launches sign-in. Authorization, DNS, VPN, firewall or network failures mean **client reachability is unverified**, not proof the Azure service is down; the prerequisite alone generates no SQL outage notifications. Checks continue while the backend is running, even when normal capture is gated or paused, but cannot run while the backend/host is stopped. Saved monitoring preferences and unrelated summary schedules are preserved. No permissions change or Azure resource-management query is required.
+
 ![Dashboard](https://img.shields.io/badge/status-live-brightgreen) ![Windows](https://img.shields.io/badge/platform-Windows-blue) ![Node.js](https://img.shields.io/badge/node-22.12%2B-brightgreen) ![License](https://img.shields.io/badge/license-MIT-blue)
 
 ## Features
@@ -147,6 +151,7 @@ Target SQL Server / Azure SQL DB / Azure SQL MI
 - Windows 10/11 (Task Scheduler + PowerShell 5.1+)
 - Node.js 22.12 or newer (20.19.x is also supported)
 - [go-sqlcmd](https://github.com/microsoft/go-sqlcmd) 1.10+ (used for all SQL connections; no ODBC driver required by the collector)
+- For live monitoring: at least one registered Azure SQL Database or Managed Instance with a successful host-side readiness check within 120 seconds. SQL Server-only inventories remain configurable but cannot collect live metrics.
 
 The full installer repairs Node.js/npm, Go sqlcmd, GitHub CLI (`gh`) and Azure CLI (`az`) through winget by default; `-Minimal` omits the two optional authentication CLIs. GitHub Copilot still needs a Copilot-enabled account, and Azure Entra authentication needs a user-authorized Azure CLI session. Missing App Installer/winget, denied elevation or offline/policy restrictions are reported with setup guidance rather than bypassed.
 

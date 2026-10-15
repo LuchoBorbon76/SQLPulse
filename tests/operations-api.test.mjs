@@ -53,7 +53,9 @@ test('monitor settings and diagnostics/history APIs remain local-only, bounded a
   assert.equal((await changed.json()).enabled, true);
   const status = await (await f.get('/api/monitor/status')).json();
   assert.equal(status.process.pid, f.child.pid);
-  assert.equal(status.monitor.enabled, true);
+  assert.equal(status.monitor.enabled, false);
+  assert.equal(status.azureReadiness.reason, 'registration-required');
+  assert.equal((await (await f.get('/api/monitor/settings')).json()).enabled, true);
   assert.equal(status.sqlProcesses.maxConcurrent, 1);
   assert.equal(status.pollingSource, 'Independent monitoring');
   assert.equal((await (await f.get('/api/alerts/settings')).json()).enabled, false);
@@ -87,4 +89,40 @@ test('service heartbeat proves owned PID and only its private lifecycle token ca
   const response = await f.post('/api/service-stop', {}, { 'X-SQL-Pulse-Service-Token': f.token });
   assert.equal(response.status, 200);
   assert.equal((await exited)[0], 0);
+});
+
+test('SQL Server-only host gates live APIs while inventory, connection validation and stored history remain available', { timeout: 30000 }, async t => {
+  const f = await host(t);
+  await f.get('/api/servers');
+  await writeFile(path.join(f.dataDir, 'servers.json'), JSON.stringify([
+    { id: 'local', name: 'Fixture', server: 'fixture.invalid', auth: 'windows', engineEdition: 3 },
+  ]));
+  const status = await (await f.get('/api/azure-readiness')).json();
+  assert.equal(status.eligible, false);
+  assert.equal(status.reason, 'registration-required');
+  assert.equal((await (await f.get('/api/servers')).json()).length, 1);
+  for (const route of ['/api/metrics?serverId=local', '/api/overview?refresh=1', '/api/query-detail?serverId=local']) {
+    const response = await f.get(route);
+    assert.equal(response.status, 409, route);
+    const body = await response.json();
+    assert.equal(body.azureRequired, true);
+    assert.equal(body.azureReadiness.eligible, false);
+  }
+  for (const route of ['/api/live-plan', '/api/kill-session', '/api/diagnostics/collect', '/api/servers/local/counters/test']) {
+    const response = await f.post(route, { serverId: 'local', sql: 'SELECT 1' });
+    assert.equal(response.status, 409, route);
+    assert.equal((await response.json()).azureRequired, true);
+  }
+  assert.equal((await f.get('/api/history?serverId=local')).status, 200);
+  assert.equal((await f.get('/api/history/status?serverId=local')).status, 200);
+  assert.equal((await f.get('/api/reports/list')).status, 200);
+  assert.equal((await f.get('/api/ai/settings')).status, 200);
+  // Invalid input is rejected by connection validation, not by the Azure gate.
+  assert.equal((await f.post('/api/servers', { name: 'Invalid', server: 'fixture.invalid', auth: 'invalid' })).status, 400);
+  assert.equal((await f.post('/api/list-databases', { server: 'fixture.invalid', auth: 'invalid' })).status, 400);
+  assert.equal((await f.get('/health')).status, 200);
+  const health = await (await f.get('/health/details')).json();
+  assert.equal(health.sqlProcesses.active, 0);
+  assert.equal(health.monitor.failed, 0);
+  assert.equal((await (await f.get('/api/alerts/history')).json()).entries.length, 0);
 });

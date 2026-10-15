@@ -205,6 +205,7 @@ test('detail requests never run in overview or hidden tabs and stale view respon
   const elements = new Map();
   const context = vm.createContext({
     AbortController, document: { hidden: false },
+    azureReadiness: { eligible: true },
     historyController: null,
     fetch: (url, options) => { const request = { url, options, ...deferred() }; requests.push(request); return request.promise; },
     el: id => { if (!elements.has(id)) elements.set(id, { classList: { add() {}, remove() {} } }); return elements.get(id); },

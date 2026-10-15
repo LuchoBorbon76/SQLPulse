@@ -89,7 +89,8 @@ test('HTTP wiring preserves configuration, encrypts credentials and isolates gen
   const disabled = await post('/api/alerts/settings', { enabled: false, recipients: ['synthetic@example.test'] });
   assert.equal(disabled.status, 200);
   assert.equal((await disabled.json()).enabled, false);
-  assert.deepEqual((await (await fetch(url + '/api/overview')).json()).servers, []);
+  assert.equal((await fetch(url + '/api/overview')).status, 409);
+  assert.equal((await (await fetch(url + '/api/azure-readiness')).json()).reason, 'registration-required');
   assert.equal((await post('/api/alerts/settings', {}, { 'Content-Type': 'text/plain' })).status, 415);
   assert.equal((await post('/api/ai/settings', {
     providerId: 'local', config: { baseUrl: providerUrl, model: 'synthetic-model', secret: 'synthetic-test-key' },

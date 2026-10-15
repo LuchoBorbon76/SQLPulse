@@ -14,7 +14,7 @@ $payloadNames = @(
     'ai-providers.mjs', 'ai-preview.mjs', 'ai-ui.js', 'ai-ui.css', 'visual-context.mjs',
     'alerts.mjs', 'alerts-ui.js', 'alerts-ui.css', 'alert-email-details.mjs', 'microsoft-email-auth.mjs',
     'counters.mjs', 'counters-ui.js', 'counters-ui.css', 'counter-templates.js',
-    'azure-sql-auth.mjs', 'cli-browser.mjs', 'connection-progress.mjs',
+    'azure-sql-auth.mjs', 'azure-prerequisite.mjs', 'cli-browser.mjs', 'connection-progress.mjs',
     'connection-request.js', 'copy-signin-code.js', 'microsoft-device-signin.js',
     'sql-endpoint.js', 'sqlcmd-options.mjs', 'sqlcmd-paths.mjs', 'disclaimer-ui.js',
     'interval-metrics.mjs', 'monitor-settings.mjs', 'operations-ui.js', 'operations-ui.css',

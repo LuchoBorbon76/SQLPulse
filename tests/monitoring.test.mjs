@@ -420,6 +420,7 @@ test('queued deleted servers and invalidated in-flight samples never reappear in
     const data = { generated_at: '2026-10-14T19:00:00Z', instance: { user_sessions: 7 } };
     const context = {
       CACHE_MS: 30000, configIdentity,
+      requireAzurePrerequisite: async () => 1,
       findServer: (list, id) => list.find(server => server.id === id),
       loadServers: async () => [stored],
       requestError: (status, message) => Object.assign(new Error(message), { status }),
@@ -450,6 +451,7 @@ test('queued deleted servers and invalidated in-flight samples never reappear in
     const context = {
       req: { method: 'PATCH', headers: { 'content-type': 'application/json' } },
       p: '/api/servers/one/monitoring', res: {}, readBody: async () => body,
+      azurePrerequisite: { status: () => ({ eligible: true }) },
       updateServers: change => store.update(change),
       findServer: (list, id) => { const server = list.find(item => item.id === id); if (!server) throw Object.assign(new Error('not found'), { status: 404 }); return server; },
       requestError: (status, message) => Object.assign(new Error(message), { status }),
@@ -489,6 +491,7 @@ test('queued deleted servers and invalidated in-flight samples never reappear in
     const servers = [cfg('one', { monitoringPaused: true })], calls = [];
     const context = {
       emailMonitoringEnabled: true, loadServers: async () => servers, shutdownController: new AbortController(),
+      requireAzurePrerequisite: async () => 1,
       emailAlerts: { observe: async (...args) => calls.push(args) }, console: { error() {} },
     };
     vm.runInNewContext(section('async function observeEmail(', 'const monitor =')+'\nglobalThis.observe=observeEmail;', context);

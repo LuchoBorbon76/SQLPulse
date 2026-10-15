@@ -198,7 +198,7 @@ test('capture settings exist only under Settings Back in Time, never in performa
   await h.el('hst-hour').dispatch('click');
   assert.ok(h.requests.every(item => !item.url.includes('/monitor/') && item.options.method === 'GET'));
   const operations = await readFile(new URL('../operations-ui.js', import.meta.url), 'utf8');
-  assert.match(operations, /id="ops-enabled"> Keep capturing for Back in Time/);
+  assert.match(operations, /id="ops-enabled"> Keep capturing when the app window is closed/);
   h.controller.destroy();
 });
 

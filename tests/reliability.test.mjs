@@ -11,6 +11,9 @@ import { createMonitorScheduler } from '../monitor-scheduler.mjs';
 import { computeHealth } from '../health.js';
 import { normalizeCounter, validateCounterSql } from '../counters.mjs';
 import { createAlertService } from '../alerts.mjs';
+import { createIncidentService } from '../incident-store.mjs';
+import { createHistoryStore } from '../history-store.mjs';
+import { createMonitorSettings } from '../monitor-settings.mjs';
 import { classifySqlEndpoint } from '../sql-endpoint.js';
 import { validateConnectionConfig, sqlcmdEnvironment, sqlcmdFailure, redactSqlDiagnostic } from '../sqlcmd-options.mjs';
 import { createConnectionProgress, connectionAbortError, throwIfConnectionAborted, commitConnection } from '../connection-progress.mjs';
@@ -84,6 +87,9 @@ async function serverFixture(t, overrides = {}) {
     createMicrosoftEmailAuth: () => ({ settings: async () => ({ clientId: '', tenant: 'consumers', authenticated: false, username: '', revision: 0 }) }),
     createAlertService: options => ({ ...createAlertService(options), removeServer: async () => {} }),
     DATA_DIR: directory, path,
+    createIncidentService, storageErrors: {}, sqlProcessLimiter: createAsyncLimiter(2), shutdownController: new AbortController(),
+    monitorOperations: createMonitorSettings({ settingsFile: path.join(directory, 'monitor-settings.json') }),
+    historical: createHistoryStore({ dataDir: directory }),
     validateConnectionConfig, redactSqlDiagnostic,
     connectionProgress: createConnectionProgress(), connectionAbortError, throwIfConnectionAborted, commitConnection,
     validateRequestConnection: (cfg, options) => {
@@ -446,23 +452,56 @@ test('overview route returns loading snapshots without awaiting SQL and shares t
 
 test('history appends serialize initial loads and atomically preserve every sample', async t => {
   const directory = await scratch(t);
-  const context = { DATA_DIR: directory, path, mkdir, createJsonStore, requestError: (status, message) => new Error(message) };
+  const context = { DATA_DIR: directory, path, mkdir, createJsonStore, createHistoryStore,
+    setInterval: () => ({ unref() {} }), requestError: (status, message) => new Error(message) };
   const history = section(serverSource, 'const HISTORY_DIR =', '// Custom counters');
   await vm.runInNewContext(`(async () => { ${history}
     globalThis.api = { appendHistory, loadHistory };
   })()`, context);
+  const baseline = Date.now() - 60000;
   const results = await Promise.allSettled(Array.from({ length: 30 }, (_, value) =>
-    context.api.appendHistory('one', { instance: { page_life_expectancy: value } })));
+    context.api.appendHistory('one', { generated_at: new Date(baseline + value * 1000).toISOString(), instance: { page_life_expectancy: value } })));
   for (const result of results) if (result.status === 'rejected') throw result.reason;
   const values = await context.api.loadHistory('one');
   assert.equal(values.length, 30);
   assert.equal(new Set(values.map(value => value.ple)).size, 30);
-  const file = path.join(directory, 'history', 'one.json');
+  const file = path.join(directory, 'history-series', 'one.json');
+  const journal = path.join(directory, 'history-series', 'one.journal');
+  const journalBefore = await readFile(journal, 'utf8');
   const content = '{broken-history';
   await writeFile(file, content);
   await assert.rejects(context.api.appendHistory('one', { instance: {} }));
   assert.equal(await readFile(file, 'utf8'), content);
-  assert.deepEqual(await readdir(path.dirname(file)), ['one.json']);
+  assert.equal(await readFile(journal, 'utf8'), journalBefore);
+  assert.deepEqual((await readdir(path.dirname(file))).sort(), ['one.journal', 'one.json']);
+});
+
+test('slow optional diagnostics do not accumulate one collection waiter for every core sample', async t => {
+  const optional = deferred();
+  let observations = 0, collections = 0, sequence = 0, nextObserved;
+  const fixture = await serverFixture(t, {
+    collectFor: async cfg => ({ server_id: cfg.id, generated_at: new Date(1700000000000 + ++sequence * 1000).toISOString(),
+      instance: { user_sessions: 1, active_requests: 0, blocked_requests: 0 } }),
+    createIncidentService: () => ({
+      observe: async () => { observations++; nextObserved.resolve(); },
+      collect: () => { collections++; return optional.promise; },
+    }),
+  });
+  const cfg = sample();
+  await writeFile(fixture.file, JSON.stringify([cfg]));
+  const stored = (await fixture.loadServers())[0];
+  for (let index = 0; index < 3; index++) {
+    nextObserved = deferred();
+    fixture.invalidateMetrics('one');
+    await fixture.getMetricsFor(stored, 0);
+    await nextObserved.promise;
+    await tick();
+  }
+  assert.equal(observations, 3);
+  assert.equal(collections, 1);
+  optional.resolve();
+  await tick();
+  await tick();
 });
 
 test('SQL subprocess executions use unique files and promptly clean success and failure paths', async t => {
@@ -470,6 +509,7 @@ test('SQL subprocess executions use unique files and promptly clean success and 
   const paths = [];
   const context = {
     TMP_DIR: directory, mkdtemp, path, writeFile, readFile, rm,
+    shutdownController: new AbortController(), AbortSignal,
     sqlProcessLimiter: createAsyncLimiter(2),
     buildSqlcmdArgs: (cfg, args) => args, pickSqlcmd: () => 'mock-sqlcmd',
     validateConnectionConfig, sqlcmdEnvironment, sqlcmdFailure, process, connectionAbortError, throwIfConnectionAborted,
@@ -505,7 +545,7 @@ function clientFixture() {
     },
     render: data => rendered.push(data.server_id),
     renderServerList() {}, updateAlertBadge() {}, recordAlertTransitions() {}, computeHealth: () => ({}),
-    setStatus() {}, renderEmpty() {},
+    setStatus() {}, renderEmpty() {}, renderHealth() {},
     localStorage: { getItem: () => null },
     endpointClassifier: classifySqlEndpoint,
     document: { hidden: false }, AbortController,

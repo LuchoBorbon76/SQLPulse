@@ -6,7 +6,7 @@ const VISUAL_TITLES = {
   instance: 'Instance metrics', timeline: 'Performance timeline', blocking: 'Blocking sessions', active: 'Active requests',
   waiters: 'Waiting tasks', waits: 'Wait statistics', latches: 'Latch statistics', buffer_pool: 'Buffer pool',
   file_io: 'File I/O', databases: 'Databases', top_queries: 'Top queries', missing_indexes: 'Missing indexes',
-  tempdb: 'TempDB', custom_counters: 'Custom counter', all: 'Server overview',
+  tempdb: 'TempDB', custom_counters: 'Custom counter', all: 'Server overview', history: 'Historical investigation',
 };
 const openAiReasoningModel = model => /^(?:o1(?:-\d{4}-\d{2}-\d{2})?|o3(?:-mini)?(?:-\d{4}-\d{2}-\d{2})?|o4-mini(?:-\d{4}-\d{2}-\d{2})?|gpt-5(?:[.-]\d+)?(?:-mini|-nano)?(?:-\d{4}-\d{2}-\d{2})?)$/.test(model);
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -22,6 +22,11 @@ export function recommendedVisualPrompts({ scope = 'instance', metricId, title }
       ['Spot changes', 'Identify spikes, sustained changes and gaps in the recorded timeline. Cite the sample times and avoid treating gaps as zero.'],
       ['Compare series', 'Which recorded timeline series change together, and what can or cannot be inferred from that correlation?'],
       ['Next sample', 'What should I compare in the next timeline samples to confirm whether the observed change persists?'],
+    ],
+    history: [
+      ['Compare periods', 'Compare the selected historical window with its baseline. Cite sample coverage and do not infer missing measurements.'],
+      ['Explain changes', 'Identify sustained changes, spikes, collection gaps and counter resets in this historical window. Distinguish correlation from cause.'],
+      ['Next checks', 'Prioritize read-only checks for the observed historical changes. Do not present old measurements as current conditions.'],
     ],
     blocking: [
       ['Head blocker', 'Identify the head blocker and downstream blocked sessions in the captured chain. Explain the waits and available query text.'],
@@ -528,6 +533,7 @@ export function initAiUi({
       const data = await api('preview', {
         serverId, providerId: id, model: d.model, reasoningEffort: d.reasoningEffort, question,
         scope: selected.scope, metricId: selected.metricId, panelTitle: selected.title, contextId: selectedContext.contextId,
+        from: selected.from, to: selected.to, baseline: selected.baseline,
       }, { signal: controller.signal });
       if (guard !== dialogSequence || generation !== reviewSequence || destroyed || el('ai-question').value.trim() !== question) return;
       if (getActiveServerId() !== serverId) throw new Error('The selected server changed. Open Ask AI on the intended visual again.');
@@ -617,6 +623,7 @@ export function initAiUi({
     el('ai-context-info').textContent = 'Capturing the selected visual...';
     const request = api('context', {
       serverId: selected.serverId, scope: selected.scope, metricId: selected.metricId, panelTitle: selected.title,
+      from: selected.from, to: selected.to, baseline: selected.baseline,
       visualSampleAt: refresh ? getServerData(selected.serverId)?.generated_at || selected.visualSampleAt : selected.visualSampleAt,
     }).then(data => {
       if (guard !== dialogSequence || capture !== contextSequence || destroyed) return;
@@ -687,7 +694,7 @@ export function initAiUi({
       el('ai-provider-cards').querySelector('[data-provider]')?.focus();
     } catch (e) { if (guard === dialogSequence) status(e.message, true); }
   }
-  async function askVisual({ serverId, scope = 'instance', metricId, title, question, visualSampleAt } = {}) {
+  async function askVisual({ serverId, scope = 'instance', metricId, title, question, visualSampleAt, from, to, baseline } = {}) {
     if (destroyed || busy) return;
     if (!serverId || !Object.hasOwn(VISUAL_TITLES, scope)) throw new Error('Select a server and a valid visual before asking AI.');
     const serverName = getServerName(serverId) || serverId;
@@ -695,7 +702,8 @@ export function initAiUi({
     const panelTitle = (String(title || VISUAL_TITLES[scope]).replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, 200)) || VISUAL_TITLES[scope];
     visual = {
       serverId, serverName, scope, metricId, title: panelTitle,
-      visualSampleAt: visualSampleAt ?? serverData?.generated_at,
+      visualSampleAt: scope === 'history' ? undefined : visualSampleAt ?? serverData?.generated_at,
+      from, to, baseline,
       lookbackHours: scope === 'top_queries' ? serverData?.sectionMetadata?.top_queries?.lookbackHours : undefined,
     };
     el('ai-suggestions').replaceChildren();

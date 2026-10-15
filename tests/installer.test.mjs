@@ -10,6 +10,8 @@ const files = [
   'storage.mjs', 'collector-cache.mjs', 'ai-providers.mjs', 'ai-preview.mjs', 'ai-ui.js', 'ai-ui.css',
   'disclaimer-ui.js', 'Start-Dashboard.ps1', 'Start-Dashboard.vbs', 'sql-dashboard-app.ico', 'sql-dashboard-logo.png',
   'sqlcmd-paths.mjs',
+  'ToolPaths.ps1', 'Dashboard-Lifecycle.ps1', 'tool-paths.mjs',
+  'Service-Helpers.ps1', 'Install-Service.ps1', 'Uninstall-Service.ps1', 'SqlPulse.Service.cs',
   'sql-endpoint.js',
   'sqlcmd-options.mjs', 'azure-sql-auth.mjs',
   'connection-progress.mjs', 'connection-request.js',
@@ -33,11 +35,13 @@ test('installer contains the exact application and dependency lockfile', async (
 test('installer launch and dependency installation use the packaged entry point and lockfile', async () => {
   const installer = await readFile(join(root, 'installer', 'install.ps1'), 'utf8');
   const launcher = await readFile(join(root, 'Start-Dashboard.ps1'), 'utf8');
+  const tools = await readFile(join(root, 'ToolPaths.ps1'), 'utf8');
   assert.ok(launcher.includes("$entryPoint = Join-Path $installDir 'server.mjs'"));
   assert.ok(launcher.includes('Start-Process -FilePath $node'));
   assert.ok(!installer.includes('server5.mjs'));
   assert.ok(installer.includes('npm ci --omit=dev'));
-  assert.ok(installer.includes("[version]'22.12.0'"));
+  assert.ok(tools.includes("[version]'22.12.0'"));
+  assert.ok(launcher.includes("Find-UsableTool 'node'"));
   assert.ok(installer.includes("'System32\\wscript.exe'"));
   assert.ok(installer.includes("'SQL Pulse.lnk'"));
   assert.ok(installer.includes("'sql-dashboard-app.ico'"));

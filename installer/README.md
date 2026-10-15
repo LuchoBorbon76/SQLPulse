@@ -50,7 +50,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 [options]
 | **GitHub CLI (`gh`)** | GitHub Copilot browser login; checked by default, omitted with `-Minimal` | `GitHub.cli` |
 | **Azure CLI (`az`)** | Entra SQL authentication using an existing Azure CLI session; checked by default, omitted with `-Minimal` | `Microsoft.AzureCLI` |
 
-Requires Windows PowerShell **5.1+** on Windows 10/11 with Windows Package Manager available. If every required tool is already usable, no package installation is attempted. The installer probes real executable versions (not just filenames), rejects old/ODBC sqlcmd, refreshes machine/user PATH while retaining session-only paths, and discovers standard and WinGet installation locations. It uses the selected Node's `npm.cmd` immediately, without reopening the terminal or depending on an npm PowerShell execution-policy exception.
+Requires Windows PowerShell **5.1+** on Windows 10/11 with Windows Package Manager available. If every required tool is already usable, no package installation is attempted. Executable version probes reject old Node and old/ODBC sqlcmd. Selected absolute paths are saved in `.sql-pulse-tools.json`; the launcher and runtime revalidate them instead of trusting filenames or an older machine-first PATH. Standard, custom PATH, and WinGet locations are searched if a saved executable moves. The installer uses the selected Node's `npm.cmd` immediately, without reopening the terminal or requiring an npm PowerShell execution-policy exception.
 
 Repairs use exact package IDs from the `winget` source, first at user scope, then at package-default scope if necessary. Some packages only support machine scope and may trigger Windows UAC; use `-UserScopeOnly` to prevent that fallback. The application itself stays per-user. Offline/managed systems may require IT-approved installation; if a selected tool still fails its version probe after repair, installation stops with the package ID and error rather than claiming success. Use `-Minimal` only if GitHub/Azure CLI-dependent features are not needed.
 
@@ -62,7 +62,36 @@ Dependencies are installed from the bundled **`package-lock.json`** with `npm ci
 
 The installer checks both port 8765 ownership and the exact installed Node entry point, including a process that is still starting. A running dashboard, active SQL/authentication child process, or an unrelated listener blocks installation **before any application files are replaced**. It does not kill processes or attempt an automatic restart. Finish/cancel operations, use the installed `Stop-Dashboard.ps1` when idle, and rerun. The newly installed stop command also checks ownership and refuses to terminate a dashboard with active children; it never stops an unrelated port owner.
 
-Upgrades preserve `servers.json`, AI/email settings, Microsoft token metadata/cache, `.encryption-key`, and the `history` folder. These are copied **together** into a timestamped `config-backups` subfolder before replacement; existing backups are retained. Keep backups private: they contain encrypted credentials and the account-bound key. The installer rejects payloads containing runtime state, keys, history or preinstalled `node_modules`, so a release cannot overwrite your configuration with the packager's files. A failed staged dependency install leaves the previous application files untouched.
+Upgrades preserve `servers.json`, AI/email settings, Microsoft token metadata/cache, `.encryption-key`, and the `history` folder. These are copied **together** into a timestamped `config-backups` subfolder before replacement; existing backups are retained. Keep backups private: they contain encrypted credentials and the account-bound key. The installer rejects payloads containing runtime state, keys, history or preinstalled `node_modules`, so a release cannot overwrite your configuration with the packager's files. A failed staged dependency install leaves the previous application files untouched. Replacement keeps the previous application files and dependency directory until every staged move succeeds. A commit failure restores them; if Windows prevents restoration, the error identifies the retained `.install-rollback-*` recovery folder. Never delete that folder before recovering its files.
+
+### Optional Windows service (explicit opt-in)
+
+Normal installation does **not** register or start a service. Desktop shortcuts and per-user logon startup remain the default. For monitoring while logged out, the installed application includes the complete `SqlPulse.Service.cs` source and explicit service-management scripts. They compile a native .NET Framework Windows service using Windows PowerShell's built-in compiler; no third-party wrapper is downloaded.
+
+1. Configure/test SQL Pulse in your own Windows session and explicitly enable/save independent monitoring in **Monitoring & history**. Service registration and every service boot require that persisted approval; email settings are not a substitute. Installing a service never enables monitoring, email, webhooks, or optional diagnostics on your behalf. Then finish/cancel active work and stop the desktop dashboard with `Stop-Dashboard.ps1`.
+2. Your Windows account must have a real password and the **Log on as a service** right. A Windows Hello PIN, passwordless-only account, disabled/expired password, or an organizational denial of service logon will not work. Ask your Windows administrator to approve/provide the necessary account right; these scripts do not grant rights or change account policy.
+3. Open **Windows PowerShell as administrator using the same Windows account** that owns the configuration, not another administrator's credentials. Run:
+
+```powershell
+$app = Join-Path $env:LOCALAPPDATA 'SqlDashboard'
+& (Join-Path $app 'Install-Service.ps1') -Credential (Get-Credential) -Start
+```
+
+The credential must identify that same Windows SID. The password is passed securely to Windows Service Control Manager, never written to application JSON or native command arguments. Existing DPAPI keys are verified before registration and again under the service identity at startup. **LocalSystem, LocalService, NetworkService, different-user migration, and copying credentials between machines are not supported.** Service mode does not create cloud accounts or grant SQL permissions. `-DataDir <existing-path>` is available for a separate same-user data directory. Without `-Start`, registration configures automatic boot startup but does not start the service immediately.
+
+The service uses the verified absolute Node executable and the owner's profile/tool directories. It disables only this installation's existing desktop logon task to avoid competing hosts; the shortcut can still open a running service's local dashboard. A service start refuses an existing desktop host or occupied port instead of stopping it. Both modes use loopback port 8765. A registered service must be explicitly removed before a normal application upgrade or uninstall.
+
+Node crashes and a stale/missing event-loop heartbeat trigger owned-process restart. The watchdog reads `/health/details` and checks only its process PID and heartbeat freshness; `degraded` SQL/storage status remains visible to the operator and never triggers host restart. A 60-second startup allowance and 45-second heartbeat threshold avoid treating SQL connectivity failures as host failures. Windows Service Control Manager also has automatic restart recovery (5/15/60 seconds) if the wrapper fails. Explicit service stop requests authenticated graceful dashboard shutdown, allows 15 seconds to finish, then closes a Windows process job containing **only its own Node process and descendants**. Application imports are gated until Node belongs to that job. Host/stdout/stderr logs are `service-host.log`, `service-server.log`, and `service-server.err.log` in the installation, each rotated at about 5 MiB with one previous file.
+
+Service sessions cannot display interactive Microsoft/GitHub sign-in windows. Cached tokens can only refresh while the identity provider, tenant policy, token lifetime, and profile access permit it. An expiring Azure CLI session or required OAuth/MFA consent needs an explicit return to the same user's desktop session to sign in; service recovery cannot manufacture authorization. Stop the service explicitly before using the desktop host, and stop the desktop host before restarting the service. While service registration remains, the launcher uses its configured data directory. If you remove service registration with a custom `-DataDir`, set `SQL_DASHBOARD_DATA_DIR` to that directory before returning to desktop mode. SMTP/provider/SQL prerequisites remain unchanged. A watchdog restart is not a guarantee of SQL, email, or cloud availability.
+
+To stop/remove service mode, run the following from the same elevated account:
+
+```powershell
+& (Join-Path $app 'Uninstall-Service.ps1')
+```
+
+This verifies the registered executable/account, disables service startup, gracefully stops the owned host, and removes service registration only. Configuration, key, history, and the desktop application remain. Desktop logon startup stays disabled until you explicitly opt back in by rerunning the normal installer.
 
 ## First run
 
@@ -84,15 +113,19 @@ Interactive authentication no longer relies on a Windows account picker behind t
 
 - `servers.json` — server registry (no plaintext passwords)
 - `ai-settings.json` — per-provider configuration and encrypted AI credentials
-- `alert-settings.json` / `alert-state.json` — approved email configuration and notification history/deduplication
+- `alert-settings.json` / `alert-state.json` — approved email/webhook configuration, policies and notification history/deduplication
+- `monitor-settings.json` — independent monitoring, collection budgets and retention preferences
+- `history-series/` — bounded numeric history journals, atomic checkpoints and hourly rollups
+- `incident-evidence.json` — explicitly opted-in local incident evidence/settings; SQL text and plans require separate choices
 - `microsoft-email-auth.json` — app registration/account metadata and encrypted MSAL email token cache
 - `.encryption-key` — AES-256 key **wrapped with Windows DPAPI (CurrentUser)**
 - These files live in the install folder; encrypted credentials and tokens are bound to your Windows account
 - Copying them to another machine / user won't decrypt
+- Numeric history, incident evidence and registry metadata are not encrypted. Retention applies to active history/evidence, not retained legacy migration files or installer backups; manage those backups separately.
 
 ## Uninstall
 
-Double-click **`uninstall.bat`**. You'll be asked whether to keep your server and AI provider configuration (saved with the encryption key to `%USERPROFILE%\SqlDashboard-config-backup` if yes).
+Remove an explicitly installed service first as described above. Double-click **`uninstall.bat`**. Uninstall refuses unrelated port owners and active SQL/authentication descendants before changing processes, tasks, or files. You'll be asked whether to keep your server and AI provider configuration (saved with the encryption key into a new timestamped subfolder of `%USERPROFILE%\SqlDashboard-config-backup` if yes, without overwriting earlier backups).
 
 Node.js, go-sqlcmd, GitHub CLI and Azure CLI are left in place — remove them via Windows Installed apps or `winget uninstall` if you don't need them. No ODBC driver is installed by this package.
 
@@ -106,7 +139,7 @@ Provider testing sends a generic health-check prompt only. Typing a question aut
 
 SQL Pulse starts with **All servers**, a compact overview of saved connections. Click a server card to drill into its detailed charts and contextual **Ask AI** buttons. Every SQL service has a badge. Export has been removed.
 
-Core snapshots are shared for 30 seconds, SQL subprocess concurrency is capped at two, expensive inventory runs every five minutes, and recent-hour Query Store aggregates run every two minutes. Custom counters have separate intervals, templates and pause controls.
+Core snapshots are shared for 30 seconds, SQL subprocess concurrency is capped at two, expensive inventory defaults to five minutes, and recent-hour Query Store aggregates default to two minutes. **Monitoring & history** provides independent unattended polling, a lower concurrency ceiling, cadence/retention controls and collector self-health. Custom counters have separate intervals, templates and pause controls. **History** adds selected-window/baseline investigation; **Diagnostics** adds optional bounded incident reads, disabled by default. See `docs/README.md` for privacy, permissions and workload limits.
 
 Configure recipients and an authorized SMTP sender under **Settings → Email alerts**. For Outlook.com or Microsoft 365, select Microsoft sign-in (OAuth2) and supply your own Application (client) ID; the dialog includes app-registration instructions for delegated SMTP.Send and the desktop localhost callback. No Microsoft password or client secret is used. Other SMTP providers retain password/relay mode. Email remains disabled until the user previews and explicitly approves recipients, triggers and message templates. Detection follows periodic polling—not instant SQL push—and requires the monitoring computer to stay awake with SQL Pulse running. SMTP credentials and the Microsoft token cache are encrypted; uncertain sends are not blindly retried. Uninstall backup includes email settings, token cache and deduplication state with the encryption key.
 

@@ -133,6 +133,22 @@ export function createConnectionRequest({
         }),
       ]);
     } catch (error) {
+      if (!timedOut && (!Number.isInteger(error.status) || error.status >= 500) && !operation.controller.signal.aborted) {
+        reconciliationRequired = true;
+        try {
+          const saveStarted = operation.progress?.phase === 'saving' || operation.progress?.cancellable === false;
+          const progress = await controlRequest(`/api/connection-progress?operationId=${encodeURIComponent(operation.id)}`);
+          emit(operation, progress);
+          if (progress.state === 'cancelled' || progress.state === 'failed' && !saveStarted) reconciliationRequired = false;
+          else if (!['completed', 'failed', 'cancelled'].includes(progress.state)) {
+            const stopped = await cancel();
+            if (['failed', 'cancelled'].includes(stopped?.state)) reconciliationRequired = false;
+          }
+        } catch { /* A lost response cannot establish that a save did not commit. */ }
+        if (reconciliationRequired) {
+          throw new Error('The connection response was lost and its save result is uncertain. Refresh the dashboard and check the server list before retrying.');
+        }
+      }
       if (timedOut && error.name === 'AbortError') {
         throw new Error('The connection test timed out. Refresh the dashboard and check the server list before retrying.');
       }

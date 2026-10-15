@@ -21,6 +21,8 @@ if ($parseErrors.Count) { throw ($parseErrors | Out-String) }
 foreach ($definition in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false)) {
     . ([scriptblock]::Create($definition.Extent.Text))
 }
+. ${quote(join(root, 'ToolPaths.ps1'))}
+. ${quote(join(root, 'Dashboard-Lifecycle.ps1'))}
 function Assert($condition, [string]$message) { if (-not $condition) { throw $message } }
 function Assert-Throws([scriptblock]$action, [string]$pattern) {
     $caught = $null
@@ -76,6 +78,7 @@ function Get-Command($Name, [switch]$All, $CommandType, $ErrorAction) {
 }
 function Test-Path($LiteralPath, $PathType) { return $true }
 function Get-ChildItem { return @() }
+function Get-Content { return '{}' }
 $nodePaths = @(Get-ToolCandidates 'node')
 Assert ($nodePaths -contains 'C:\\custom\\node.exe') 'Native PATH Node missing'
 Assert ($nodePaths -contains "$env:ProgramFiles\\nodejs\\node.exe") 'Machine Node missing'
@@ -187,6 +190,7 @@ function Get-CimInstance($ClassName, $Filter, $ErrorAction) {
     return $script:processes
 }
 function Get-NetTCPConnection { return $script:listeners }
+function Get-SqlPulseService { return $null }
 function Stop-Process($Id, $ErrorAction) { $script:stopped += $Id }
 Assert-InstallIdle 'C:\\App'
 $own = [pscustomobject]@{ Name = 'node.exe'; ProcessId = 123; ParentProcessId = 10; CommandLine = 'node.exe "C:\\App\\server.mjs"'; CreationDate = 'today' }
@@ -233,18 +237,22 @@ $InstallDir = Join-Path $fixture 'installed'
 $scriptDir = Join-Path $fixture 'installer'
 $payload = Join-Path $scriptDir 'payload'
 $null = New-Item -ItemType Directory -Path $payload, $InstallDir -Force
-foreach ($file in @('server.mjs', 'package.json', 'package-lock.json', 'Start-Dashboard.ps1', 'Start-Dashboard.vbs', 'sql-dashboard-app.ico')) {
+foreach ($file in @('server.mjs', 'package.json', 'package-lock.json', 'Start-Dashboard.ps1', 'Start-Dashboard.vbs', 'sql-dashboard-app.ico',
+    'ToolPaths.ps1', 'Dashboard-Lifecycle.ps1', 'tool-paths.mjs', 'Service-Helpers.ps1', 'Install-Service.ps1', 'Uninstall-Service.ps1', 'SqlPulse.Service.cs')) {
     Set-Content -LiteralPath (Join-Path $payload $file) -Value "new $file"
 }
 Set-Content -LiteralPath (Join-Path $InstallDir 'server.mjs') -Value 'old server'
 $oldModules = Join-Path $InstallDir 'node_modules'
 $null = New-Item -ItemType Directory -Path $oldModules
 Set-Content -LiteralPath (Join-Path $oldModules 'old.txt') -Value 'old dependency'
-foreach ($file in @('servers.json', 'ai-settings.json', 'alert-settings.json', 'alert-state.json', 'microsoft-email-auth.json', '.encryption-key')) {
+foreach ($file in @('servers.json', 'ai-settings.json', 'alert-settings.json', 'alert-state.json', 'microsoft-email-auth.json', '.encryption-key', 'monitor-settings.json', 'incident-evidence.json')) {
     Set-Content -LiteralPath (Join-Path $InstallDir $file) -Value "private $file"
 }
 $null = New-Item -ItemType Directory -Path (Join-Path $InstallDir 'history')
 Set-Content -LiteralPath (Join-Path $InstallDir 'history\\one.json') -Value 'private history'
+$null = New-Item -ItemType Directory -Path (Join-Path $InstallDir 'history-series')
+Set-Content -LiteralPath (Join-Path $InstallDir 'history-series\\.settings.json') -Value 'private retention settings'
+Set-Content -LiteralPath (Join-Path $InstallDir 'history-series\\one.json') -Value 'private history series'
 Assert-SafePayload $payload
 Set-Content -LiteralPath (Join-Path $payload '.encryption-key') -Value 'must never ship'
 Assert-Throws { Assert-SafePayload $payload } 'Unsafe installer payload'
@@ -257,6 +265,7 @@ $script:failDependencies = $true
 $script:nativeCalls = @()
 function Get-CimInstance { return @() }
 function Get-NetTCPConnection { return @() }
+function Get-SqlPulseService { return $null }
 function Find-UsableTool { [pscustomobject]@{ Path = 'C:\\mock-node\\node.exe'; Version = '24.14.1' } }
 function Invoke-InstallerNative($Path, $Arguments) {
     $script:nativeCalls += ,@($Arguments)
@@ -271,7 +280,8 @@ function Invoke-InstallerNative($Path, $Arguments) {
 # Execute the actual installer main block, with external work mocked above.
 $main = ($ast.EndBlock.Statements | Where-Object {
     $_ -isnot [System.Management.Automation.Language.FunctionDefinitionAst] -and
-    $_.Extent.Text -notmatch '^\\$(scriptDir|payload)\\s*='
+    $_.Extent.Text -notmatch '^\\$(scriptDir|payload)\\s*=' -and
+    $_.Extent.Text -notmatch '^\\. \\(Join-Path \\$payload '
 } | ForEach-Object { $_.Extent.Text }) -join "\`n"
 $mainScript = [scriptblock]::Create($main)
 Assert-Throws { . $mainScript } 'npm ci failed'
@@ -285,7 +295,8 @@ Assert (Test-Path -LiteralPath (Join-Path $oldModules 'new.txt')) 'New locked de
 Assert (-not (Test-Path -LiteralPath (Join-Path $oldModules 'old.txt'))) 'Stale dependencies were retained'
 $backups = @(Get-ChildItem -LiteralPath (Join-Path $InstallDir 'config-backups') -Directory)
 Assert ($backups.Count -eq 1) 'Expected one grouped backup'
-foreach ($file in @('servers.json', 'ai-settings.json', 'alert-settings.json', 'alert-state.json', 'microsoft-email-auth.json', '.encryption-key', 'history\\one.json')) {
+foreach ($file in @('servers.json', 'ai-settings.json', 'alert-settings.json', 'alert-state.json', 'microsoft-email-auth.json', '.encryption-key',
+    'monitor-settings.json', 'incident-evidence.json', 'history\\one.json', 'history-series\\.settings.json', 'history-series\\one.json')) {
     $original = Get-Content -LiteralPath (Join-Path $InstallDir $file) -Raw
     $backup = Get-Content -LiteralPath (Join-Path $backups[0].FullName $file) -Raw
     Assert ($original -eq $backup -and $original -match '^private') "Runtime state not preserved/backed up: $file"

@@ -21,6 +21,9 @@ export function createMonitorScheduler({
   const samples = new Map(), pending = new Map(), generations = new Map(), trends = new Map();
   const limited = createAsyncLimiter(maxConcurrent);
   let servers = [], enabled = false, timer, viewingUntil = 0, lastCycleAt = null, refreshing = null;
+  let lastSchedulerError = null, completed = 0, failed = 0;
+  const durations = [];
+  const callbacks = new Set();
   let interval = validInterval(intervalSeconds);
   let stopped = false;
   function validInterval(value) {
@@ -32,7 +35,12 @@ export function createMonitorScheduler({
       servers.some(server => server.id === job.server.id && configIdentity(server) === job.identity);
   }
   function notify(callback, ...args) {
-    if (callback) Promise.resolve().then(() => callback(...args)).catch(() => {});
+    if (!callback) return;
+    const pending = Promise.resolve().then(() => callback(...args)).catch(error => {
+      lastSchedulerError = redactError(error);
+      console.error('Monitor sample processing failed:', lastSchedulerError);
+    }).finally(() => callbacks.delete(pending));
+    callbacks.add(pending);
   }
   function acceptSample(server, data) {
     const identity = configIdentity(server), previous = samples.get(server.id);
@@ -62,14 +70,17 @@ export function createMonitorScheduler({
     if (!generations.has(server.id)) generations.set(server.id, 0);
     const job = { server, identity, generation: generations.get(server.id) };
     pending.set(server.id, job);
-    limited(async () => {
+    job.promise = limited(async () => {
       if (stopped || !currentJob(job) || servers.find(item => item.id === server.id)?.monitoringPaused) return;
       job.started = true;
+      job.startedAt = now();
       try {
         const data = await collect(server, force ? 15000 : 30000);
+        completed++;
         if (currentJob(job)) acceptSample(server, data);
       } catch (error) {
         if (!currentJob(job) || servers.find(item => item.id === server.id)?.monitoringPaused || error.monitoringPaused) return;
+        failed++;
         const old = samples.get(server.id);
         samples.set(server.id, {
           identity, data: old?.identity === identity ? old.data : undefined,
@@ -82,11 +93,17 @@ export function createMonitorScheduler({
         trends.set(server.id, { identity, points: ring });
         notify(onError, server, error);
       } finally {
+        durations.push(Math.max(0, now() - job.startedAt));
+        if (durations.length > 100) durations.shift();
         lastCycleAt = new Date(now()).toISOString();
       }
     }).finally(() => {
       if (pending.get(server.id) === job) pending.delete(server.id);
       arm();
+    });
+    job.promise.catch(error => {
+      lastSchedulerError = redactError(error);
+      console.error('Monitor queued collection failed:', lastSchedulerError);
     });
   }
   async function reconcile() {
@@ -103,11 +120,15 @@ export function createMonitorScheduler({
     stopped = false;
     if (refreshing) return refreshing;
     refreshing = reconcile().then(list => {
+      lastSchedulerError = null;
       const selected = ids ? new Set(ids) : null;
       for (const server of list) if (!selected || selected.has(server.id)) enqueue(server, force);
     }).finally(() => { refreshing = null; arm(); });
     // A bad registry must not produce an unhandled background rejection.
-    refreshing.catch(() => {});
+    refreshing.catch(error => {
+      lastSchedulerError = redactError(error);
+      console.error('Monitor registry refresh failed:', lastSchedulerError);
+    });
     return refreshing;
   }
   function arm() {
@@ -123,6 +144,7 @@ export function createMonitorScheduler({
   }
   function configure(settings = {}) {
     if (settings.intervalSeconds !== undefined) interval = validInterval(settings.intervalSeconds);
+    if (settings.maxConcurrent !== undefined) limited.configure(settings.maxConcurrent);
     if (settings.enabled !== undefined) {
       if (typeof settings.enabled !== 'boolean') throw new Error('Monitor enabled must be a boolean');
       enabled = settings.enabled;
@@ -169,8 +191,21 @@ export function createMonitorScheduler({
           ...(valid && sample.error ? { error: sample.error } : {}),
         };
       }),
-      monitor: { enabled, intervalSeconds: interval, lastCycleAt, collecting: pending.size > 0 },
+      monitor: { enabled, intervalSeconds: interval, lastCycleAt, collecting: pending.size > 0, ...stats() },
     };
   }
-  return { snapshot, requestRefresh, configure, start: configure, stop, invalidate, acceptSample };
+  function stats() {
+    const ordered = [...durations].sort((a, b) => a - b);
+    return {
+      enabled, intervalSeconds: interval, ...limited.stats(), pending: pending.size, processingSamples: callbacks.size, completed, failed,
+      p95CollectionMs: ordered.length ? ordered[Math.ceil(ordered.length * .95) - 1] : null,
+      oldestActiveMs: Math.max(0, ...[...pending.values()].filter(job => job.started).map(job => now() - job.startedAt)),
+      lastError: lastSchedulerError,
+    };
+  }
+  async function idle() {
+    await Promise.allSettled([...pending.values()].map(job => job.promise));
+    await Promise.allSettled([...callbacks]);
+  }
+  return { snapshot, requestRefresh, configure, start: configure, stop, invalidate, acceptSample, stats, idle };
 }

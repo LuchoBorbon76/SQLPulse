@@ -7,7 +7,11 @@ import crypto from 'node:crypto';
 import { atomicWriteFile, createJsonStore, validateServerRegistry } from './storage.mjs';
 import { createCollectorCache, createAsyncLimiter, createSectionCache, configIdentity, connectionIdentity } from './collector-cache.mjs';
 import { createMonitorScheduler } from './monitor-scheduler.mjs';
+import { deriveIntervalMetrics } from './interval-metrics.mjs';
 import { computeHealth } from './health.js';
+import { createMonitorSettings, monitorHealth } from './monitor-settings.mjs';
+import { createHistoryStore } from './history-store.mjs';
+import { createIncidentService } from './incident-store.mjs';
 import { createAlertService } from './alerts.mjs';
 import { createMicrosoftEmailAuth } from './microsoft-email-auth.mjs';
 import { createCounterRunner, normalizeCounter, validateCounterSql } from './counters.mjs';
@@ -28,6 +32,12 @@ const { go: GO_SQLCMD } = sqlcmdPaths();
 const SERVERS_FILE = path.join(DATA_DIR, 'servers.json');
 const KEY_FILE = path.join(DATA_DIR, '.encryption-key');
 const TMP_DIR = path.join(DATA_DIR, 'tmp');
+const monitorOperations = createMonitorSettings({ settingsFile: path.join(DATA_DIR, 'monitor-settings.json') });
+const storageErrors = {};
+const shutdownController = new AbortController();
+let heartbeatAt = Date.now();
+const heartbeatTimer = setInterval(() => { heartbeatAt = Date.now(); }, 5000);
+heartbeatTimer.unref();
 
 // ==============================
 // Password encryption at rest (AES-256-GCM),
@@ -257,6 +267,13 @@ FOR JSON PATH, WITHOUT_ARRAY_WRAPPER;
 const MEGA_SQL_AZURE = `
 SET NOCOUNT ON;
 SET ANSI_WARNINGS ON;
+DECLARE @sqlserver_start_time DATETIME;
+BEGIN TRY
+  SELECT @sqlserver_start_time=sqlserver_start_time FROM sys.dm_os_sys_info;
+END TRY
+BEGIN CATCH
+  SET @sqlserver_start_time=NULL;
+END CATCH;
 SELECT
   JSON_QUERY((SELECT
      @@SERVERNAME AS server_name,
@@ -264,7 +281,7 @@ SELECT
      CAST(SERVERPROPERTY('Edition') AS NVARCHAR(128)) AS edition,
      CAST(ISNULL(SERVERPROPERTY('ProductLevel'),'') AS NVARCHAR(32)) AS product_level,
      CAST(SERVERPROPERTY('EngineEdition') AS INT) AS engine_edition,
-     NULL AS sqlserver_start_time,
+     @sqlserver_start_time AS sqlserver_start_time,
      NULL AS uptime_min,
      (SELECT TOP 1 avg_cpu_percent FROM sys.dm_db_resource_stats ORDER BY end_time DESC) AS avg_cpu_percent,
      (SELECT TOP 1 avg_memory_usage_percent FROM sys.dm_db_resource_stats ORDER BY end_time DESC) AS avg_memory_percent,
@@ -272,10 +289,11 @@ SELECT
      (SELECT TOP 1 avg_log_write_percent FROM sys.dm_db_resource_stats ORDER BY end_time DESC) AS avg_log_write_percent,
      (SELECT COUNT(*) FROM sys.dm_exec_connections) AS connections,
      (SELECT COUNT(*) FROM sys.dm_exec_sessions WHERE is_user_process=1) AS user_sessions,
-     (SELECT COUNT(*) FROM sys.dm_exec_requests WHERE session_id > 50) AS active_requests,
-     (SELECT COUNT(*) FROM sys.dm_exec_requests WHERE blocking_session_id <> 0) AS blocked_requests
+     (SELECT COUNT(*) FROM sys.dm_exec_requests r JOIN sys.dm_exec_sessions s ON s.session_id=r.session_id WHERE s.is_user_process=1 AND r.session_id<>@@SPID) AS active_requests,
+     (SELECT COUNT(*) FROM sys.dm_exec_requests WHERE blocking_session_id <> 0 AND blocking_session_id <> -5 AND session_id<>@@SPID) AS blocked_requests
    FOR JSON PATH, WITHOUT_ARRAY_WRAPPER)) AS instance,
-  JSON_QUERY((SELECT TOP 12 wait_type,
+  JSON_QUERY((SELECT wait_type,
+     wait_time_ms, signal_wait_time_ms,
      CAST(wait_time_ms/1000.0 AS DECIMAL(18,3)) AS wait_time_s,
      waiting_tasks_count AS tasks,
      CAST(wait_time_ms*1.0/NULLIF(waiting_tasks_count,0) AS DECIMAL(18,2)) AS avg_wait_ms,
@@ -291,7 +309,8 @@ SELECT
        'FT_IFTS_SCHEDULER_IDLE_WAIT','XE_DISPATCHER_WAIT','XE_DISPATCHER_JOIN')
    ORDER BY wait_time_ms DESC
    FOR JSON PATH)) AS waits,
-  JSON_QUERY((SELECT TOP 15 DB_NAME() AS db_name, mf.name AS logical_name, mf.type_desc AS file_type,
+  JSON_QUERY((SELECT DB_NAME() AS db_name, mf.name AS logical_name, mf.type_desc AS file_type,
+     f.database_id, f.file_id, f.sample_ms,
      CAST(f.size_on_disk_bytes/1024.0/1024 AS DECIMAL(18,1)) AS size_mb,
      f.num_of_reads AS reads, f.num_of_writes AS writes,
      f.io_stall_read_ms AS read_stall_ms, f.io_stall_write_ms AS write_stall_ms,
@@ -340,15 +359,16 @@ SELECT
       FROM sys.dm_os_process_memory p CROSS JOIN sys.dm_os_sys_info s) AS avg_memory_percent,
      (SELECT COUNT(*) FROM sys.dm_exec_connections) AS connections,
      (SELECT COUNT(*) FROM sys.dm_exec_sessions WHERE is_user_process=1) AS user_sessions,
-     (SELECT COUNT(*) FROM sys.dm_exec_requests WHERE session_id > 50) AS active_requests,
-     (SELECT COUNT(*) FROM sys.dm_exec_requests WHERE blocking_session_id <> 0) AS blocked_requests,
+     (SELECT COUNT(*) FROM sys.dm_exec_requests r JOIN sys.dm_exec_sessions s ON s.session_id=r.session_id WHERE s.is_user_process=1 AND r.session_id<>@@SPID) AS active_requests,
+     (SELECT COUNT(*) FROM sys.dm_exec_requests WHERE blocking_session_id <> 0 AND blocking_session_id <> -5 AND session_id<>@@SPID) AS blocked_requests,
      ISNULL((SELECT cntr_value FROM sys.dm_os_performance_counters WHERE counter_name='Page life expectancy' AND object_name LIKE '%Buffer Manager%'),0) AS page_life_expectancy,
-     ISNULL((SELECT cntr_value FROM sys.dm_os_performance_counters WHERE counter_name='Batch Requests/sec'),0) AS batch_requests_per_sec_cum,
-     ISNULL((SELECT cntr_value FROM sys.dm_os_performance_counters WHERE counter_name='SQL Compilations/sec'),0) AS compilations_cum,
+     (SELECT cntr_value FROM sys.dm_os_performance_counters WHERE counter_name='Batch Requests/sec') AS batch_requests_per_sec_cum,
+     (SELECT cntr_value FROM sys.dm_os_performance_counters WHERE counter_name='SQL Compilations/sec') AS compilations_cum,
      ISNULL((SELECT cntr_value FROM sys.dm_os_performance_counters WHERE counter_name='Buffer cache hit ratio'),0) AS buffer_cache_hit_ratio,
      ISNULL((SELECT cntr_value FROM sys.dm_os_performance_counters WHERE counter_name='Buffer cache hit ratio base'),0) AS buffer_cache_hit_ratio_base
    FOR JSON PATH, WITHOUT_ARRAY_WRAPPER)) AS instance,
-  JSON_QUERY((SELECT TOP 12 wait_type,
+  JSON_QUERY((SELECT wait_type,
+     wait_time_ms, signal_wait_time_ms,
      CAST(wait_time_ms/1000.0 AS DECIMAL(18,3)) AS wait_time_s,
      waiting_tasks_count AS tasks,
      CAST(wait_time_ms*1.0/NULLIF(waiting_tasks_count,0) AS DECIMAL(18,2)) AS avg_wait_ms,
@@ -357,7 +377,8 @@ SELECT
    WHERE wait_type NOT IN (${WAIT_EXCLUDES}) AND waiting_tasks_count > 0
    ORDER BY wait_time_ms DESC
    FOR JSON PATH)) AS waits,
-  JSON_QUERY((SELECT TOP 15 DB_NAME(f.database_id) AS db_name, mf.name AS logical_name, mf.type_desc AS file_type,
+  JSON_QUERY((SELECT DB_NAME(f.database_id) AS db_name, mf.name AS logical_name, mf.type_desc AS file_type,
+     f.database_id, f.file_id, f.sample_ms,
      CAST(f.size_on_disk_bytes/1024.0/1024 AS DECIMAL(18,1)) AS size_mb,
      f.num_of_reads AS reads, f.num_of_writes AS writes,
      f.io_stall_read_ms AS read_stall_ms, f.io_stall_write_ms AS write_stall_ms,
@@ -396,19 +417,22 @@ SELECT
    FOR JSON PATH)) AS latches,
   JSON_QUERY((
     SELECT session_id, blocking_session_id, wait_type, wait_ms, wait_resource, db_name,
-           command, login_name, host_name, program_name, query_text, plan_handle_hex
+           command, status, open_transaction_count, login_name, host_name, program_name, query_text, plan_handle_hex
     FROM (
-      SELECT r.session_id, r.blocking_session_id, r.wait_type, r.wait_time AS wait_ms,
-             r.wait_resource, DB_NAME(r.database_id) AS db_name, r.command,
+      SELECT s.session_id, ISNULL(r.blocking_session_id,0) AS blocking_session_id, r.wait_type, r.wait_time AS wait_ms,
+             r.wait_resource, DB_NAME(COALESCE(r.database_id,s.database_id)) AS db_name, r.command,
+             COALESCE(r.status,s.status) AS status, s.open_transaction_count,
              s.login_name, s.host_name, s.program_name,
              LEFT(REPLACE(REPLACE(st.text,CHAR(13),' '),CHAR(10),' '),200) AS query_text,
              CONVERT(NVARCHAR(200), r.plan_handle, 1) AS plan_handle_hex
-      FROM sys.dm_exec_requests r
-      JOIN sys.dm_exec_sessions s ON r.session_id = s.session_id
-      OUTER APPLY sys.dm_exec_sql_text(r.sql_handle) st
+      FROM sys.dm_exec_sessions s
+      LEFT JOIN sys.dm_exec_requests r ON r.session_id = s.session_id
+      OUTER APPLY (SELECT TOP (1) c.most_recent_sql_handle FROM sys.dm_exec_connections c
+                   WHERE c.session_id=s.session_id ORDER BY c.connect_time DESC) c
+      OUTER APPLY sys.dm_exec_sql_text(COALESCE(r.sql_handle,c.most_recent_sql_handle)) st
       WHERE s.is_user_process = 1
-        AND (r.blocking_session_id <> 0
-             OR r.session_id IN (SELECT DISTINCT blocking_session_id FROM sys.dm_exec_requests WHERE blocking_session_id <> 0))
+        AND ((r.blocking_session_id <> 0 AND r.blocking_session_id <> -5)
+             OR s.session_id IN (SELECT DISTINCT blocking_session_id FROM sys.dm_exec_requests WHERE blocking_session_id > 0))
     ) B
     ORDER BY blocking_session_id, wait_ms DESC
     FOR JSON PATH)) AS blocking,
@@ -429,7 +453,7 @@ SELECT
 FOR JSON PATH, WITHOUT_ARRAY_WRAPPER;
 `;
 
-function buildInventorySql(azureDb) {
+function buildInventorySql(azureDb, { bufferPoolEnabled = true } = {}) {
   const sections = {
     databases: azureDb ? `SELECT DB_NAME() AS name, 'ONLINE' AS state, 'FULL' AS recovery,
       (SELECT compatibility_level FROM sys.databases WHERE database_id=DB_ID()) AS compat,
@@ -449,7 +473,7 @@ function buildInventorySql(azureDb) {
       FROM sys.databases d JOIN sys.master_files f ON d.database_id=f.database_id
       GROUP BY d.name,d.state_desc,d.recovery_model_desc,d.compatibility_level,d.is_query_store_on
       ORDER BY d.name FOR JSON PATH, INCLUDE_NULL_VALUES`,
-    ...(azureDb ? {} : { buffer_pool: `SELECT DB_NAME(database_id) AS db_name,COUNT_BIG(*)*8/1024 AS buffer_mb
+    ...(azureDb || !bufferPoolEnabled ? {} : { buffer_pool: `SELECT DB_NAME(database_id) AS db_name,COUNT_BIG(*)*8/1024 AS buffer_mb
       FROM sys.dm_os_buffer_descriptors WHERE database_id<>32767
       GROUP BY database_id ORDER BY COUNT_BIG(*) DESC FOR JSON PATH` }),
     missing_indexes: `SELECT TOP 15 ${azureDb ? 'DB_NAME()' : 'DB_NAME(mid.database_id)'} AS db_name,
@@ -482,7 +506,7 @@ SET ANSI_WARNINGS ON;
 DECLARE @topqSql NVARCHAR(MAX)=N'';
 SELECT @topqSql = @topqSql + '
 UNION ALL
-SELECT * FROM (SELECT TOP 8 '''+REPLACE(d.name,'''','''''')+''' AS db_name, q.query_id, SUM(rs.count_executions) AS execs,
+SELECT * FROM (SELECT TOP 15 '''+REPLACE(d.name,'''','''''')+''' AS db_name, q.query_id, SUM(rs.count_executions) AS execs,
    CAST(SUM(rs.avg_cpu_time*rs.count_executions)/1000.0 AS DECIMAL(18,1)) AS total_cpu_ms,
    CAST(SUM(rs.avg_cpu_time*rs.count_executions)/NULLIF(SUM(rs.count_executions),0)/1000.0 AS DECIMAL(18,1)) AS avg_cpu_ms,
    CAST(SUM(rs.avg_duration*rs.count_executions)/NULLIF(SUM(rs.count_executions),0)/1000.0 AS DECIMAL(18,1)) AS avg_dur_ms,
@@ -515,6 +539,8 @@ SELECT JSON_QUERY(@topq) AS top_queries FOR JSON PATH, WITHOUT_ARRAY_WRAPPER;
 const sqlProcessLimiter = createAsyncLimiter(2);
 const sectionCollector = createSectionCache();
 async function runSqlcmdOutput(cfg, sql, tag, extraArgs, timeoutMs, options = {}) {
+  options = { ...options, signal: options.signal
+    ? AbortSignal.any([options.signal, shutdownController.signal]) : shutdownController.signal };
   throwIfConnectionAborted(options.signal);
   validateConnectionConfig(cfg, { requireDatabase: false });
   const directory = await mkdtemp(path.join(TMP_DIR, `${tag}-`));
@@ -577,7 +603,13 @@ async function runSqlcmdJson(cfg, sql, tag, timeoutSec, options = {}) {
   }
 }
 
-async function collectFor(cfg) {
+async function collectFor(cfg, policy = {}) {
+  if (!policy || typeof policy !== 'object' || Array.isArray(policy)) throw new Error('Invalid collection policy');
+  const { inventoryIntervalSeconds = 300, queryStoreIntervalSeconds = 120, bufferPoolEnabled = true } = policy;
+  for (const value of [inventoryIntervalSeconds, queryStoreIntervalSeconds]) {
+    if (!Number.isSafeInteger(value) || value < 60 || value > 86400) throw new Error('Collection intervals must be whole seconds from 60 to 86400');
+  }
+  if (typeof bufferPoolEnabled !== 'boolean') throw new Error('Buffer-pool collection enabled must be a boolean');
   const started = Date.now();
 
   // If engineEdition unknown, probe now so we route to the right batch.
@@ -593,9 +625,14 @@ async function collectFor(cfg) {
   // Confirm edition from the main sample as well as the connection probe.
   if (mainData.instance?.engine_edition) cfg.engineEdition = Number(mainData.instance.engine_edition);
   const data = { ...mainData };
+  data.generated_at = new Date().toISOString();
+  data.intervals = deriveIntervalMetrics(cfg, data);
+  if (Array.isArray(data.waits)) data.waits = data.waits.slice(0, 12);
+  if (Array.isArray(data.file_io)) data.file_io = data.file_io.slice(0, 15);
   data.sectionMetadata = {};
-  const inventory = await sectionCollector.get(cfg, 'inventory', 300000, async previous => {
-    const result = await runSqlcmdJson(cfg, useAzureDbBatch ? INVENTORY_SQL_AZURE : INVENTORY_SQL, 'inventory', 30);
+  const inventorySql = useAzureDbBatch ? INVENTORY_SQL_AZURE : bufferPoolEnabled ? INVENTORY_SQL : buildInventorySql(false, { bufferPoolEnabled: false });
+  const inventory = await sectionCollector.get(cfg, bufferPoolEnabled ? 'inventory' : 'inventory-no-buffer', inventoryIntervalSeconds * 1000, async previous => {
+    const result = await runSqlcmdJson(cfg, inventorySql, 'inventory', 30);
     result.sectionSamples = {};
     for (const name of ['databases', 'buffer_pool', 'missing_indexes']) {
       if (result[`${name}_error`]) {
@@ -606,22 +643,24 @@ async function collectFor(cfg) {
     return result;
   });
   for (const name of ['databases', 'buffer_pool', 'missing_indexes']) {
-    const applicable = !(useAzureDbBatch && name === 'buffer_pool');
-    const error = inventory.error || inventory.data?.[`${name}_error`];
+    const disabled = name === 'buffer_pool' && !useAzureDbBatch && !bufferPoolEnabled;
+    const applicable = !(name === 'buffer_pool' && (useAzureDbBatch || disabled));
+    const error = applicable ? inventory.error || inventory.data?.[`${name}_error`] : null;
     if (applicable) data[name] = inventory.data?.[name] ?? null;
     else data[name] = null;
     data.sectionMetadata[name] = {
       sampledAt: applicable ? inventory.data?.sectionSamples?.[name] ?? null : null,
-      stale: !!error, intervalSeconds: 300, applicable,
+      stale: !!error, intervalSeconds: inventoryIntervalSeconds, applicable,
+      ...(disabled ? { disabled: true, reason: 'disabled-by-policy' } : {}),
       ...(error ? { error: redactSqlDiagnostic(error.message || String(error), cfg).slice(0, 300) } : {}),
     };
   }
-  const queries = await sectionCollector.get(cfg, 'top_queries', 120000, () =>
+  const queries = await sectionCollector.get(cfg, 'top_queries', queryStoreIntervalSeconds * 1000, () =>
     runSqlcmdJson(cfg, useAzureDbBatch ? TOP_QUERIES_SQL_AZURE : TOP_QUERIES_SQL, 'topq', 30));
   data.top_queries = queries.data?.top_queries ?? null;
   data.sectionMetadata.top_queries = {
     sampledAt: queries.sampledAt != null ? new Date(queries.sampledAt).toISOString() : null,
-    stale: !!queries.error, intervalSeconds: 120, lookbackHours: 1,
+    stale: !!queries.error, intervalSeconds: queryStoreIntervalSeconds, lookbackHours: 1,
     ...(queries.error ? { error: redactSqlDiagnostic(queries.error.message, cfg).slice(0, 300) } : {}),
   };
   data.server_id = cfg.id;
@@ -647,7 +686,7 @@ async function collectFor(cfg) {
       sampledAt: null, stale: true, error: 'Counter configuration is invalid; review saved counters.',
     };
   }
-  data.generated_at = new Date().toISOString();
+  data.assembled_at = new Date().toISOString();
   data.collect_ms = Date.now() - started;
   return data;
 }
@@ -690,7 +729,7 @@ const metricsCollector = createCollectorCache(async stored => {
   if (findServer(await loadServers(), stored.id).monitoringPaused) {
     throw Object.assign(requestError(409, 'Monitoring is paused for this server'), { monitoringPaused: true });
   }
-  const data = await collectFor(cfg);
+  const data = await collectFor(cfg, (await monitorOperations.settings()).collection);
   // Re-read under the registry lock; never save a collection's old snapshot.
   const persistEdition = cfg.engineEdition && cfg.engineEdition !== current.engineEdition;
   const verifyCurrent = list => {
@@ -700,7 +739,14 @@ const metricsCollector = createCollectorCache(async stored => {
   };
   if (persistEdition) await updateServers(verifyCurrent);
   else verifyCurrent(await loadServers());
-  appendHistory(cfg.id, data).catch(error => console.error(`History save failed for ${cfg.id}: ${error.message}`));
+  try {
+    await appendHistory(cfg.id, data);
+    delete storageErrors[`history:${cfg.id}`];
+  } catch (error) {
+    storageErrors[`history:${cfg.id}`] = 'Local history could not be saved; check disk space and permissions.';
+    data.persistence = { historyError: storageErrors[`history:${cfg.id}`] };
+    console.error(`History save failed for ${cfg.id}: ${error.message}`);
+  }
   return data;
 }, { defaultMaxAgeMs: CACHE_MS });
 
@@ -723,10 +769,25 @@ function invalidateMetrics(id) {
   sectionCollector.invalidate(id);
   counterRunner.invalidate(id);
   monitor.invalidate(id);
+  delete storageErrors[`history:${id}`];
+  delete storageErrors[`incidents:${id}`];
 }
 
 // Fleet monitoring is opt-in at rest; active overview requests renew a finite viewing lease.
 let emailMonitoringEnabled = false;
+let emailMonitoringInterval = 60;
+const incidentJobs = new Map();
+const incidents = createIncidentService({
+  dataDir: DATA_DIR,
+  runSql: async (stored, sql, tag, timeoutSec = 10, options = {}) => {
+    const latest = findServer(await loadServers(), stored.id);
+    const registration = Object.hasOwn(options, 'registeredDatabase') ? { ...stored, database: options.registeredDatabase } : stored;
+    if (latest.monitoringPaused || connectionIdentity(latest) !== connectionIdentity(registration)) {
+      throw requestError(409, 'Server was paused or changed before diagnostic collection');
+    }
+    return runSqlcmdJson(await resolveServer({ ...latest, database: stored.database }), sql, tag, timeoutSec);
+  },
+});
 const microsoftEmailAuth = createMicrosoftEmailAuth({
   settingsFile: path.join(DATA_DIR, 'microsoft-email-auth.json'),
   encryptSecret: encryptPassword, decryptSecret: decryptPassword,
@@ -740,7 +801,7 @@ const emailAlerts = createAlertService({
   onDeliveryWarning: status => console.error(`Email delivery: ${status.message}`),
 });
 async function observeEmail(server, data, options) {
-  if (!emailMonitoringEnabled) return;
+  if (!emailMonitoringEnabled || shutdownController.signal.aborted) return;
   try {
     const latest = (await loadServers()).find(item => item.id === server.id);
     if (!latest || latest.monitoringPaused || options?.error?.monitoringPaused) return;
@@ -751,12 +812,46 @@ async function observeEmail(server, data, options) {
 }
 const monitor = createMonitorScheduler({
   loadServers, collect: getMetricsFor, health: computeHealth,
-  onSample: (server, data) => observeEmail(server, data),
+  onSample: async (server, data) => {
+    if (shutdownController.signal.aborted) return;
+    await observeEmail(server, data);
+    try {
+      const latest = findServer(await loadServers(), server.id);
+      if (latest.monitoringPaused || connectionIdentity(latest) !== connectionIdentity(server)) return;
+      await incidents.observe(latest, data);
+      if (!incidentJobs.has(server.id)) {
+        const job = incidents.collect(latest).then(() => {
+          delete storageErrors[`incidents:${server.id}`];
+        }, error => {
+          storageErrors[`incidents:${server.id}`] = 'Optional incident collection failed; review Diagnostics status.';
+          console.error(`Incident collection failed for ${server.id}: ${redactSqlDiagnostic(error.message, server)}`);
+        }).finally(() => { if (incidentJobs.get(server.id) === job) incidentJobs.delete(server.id); });
+        incidentJobs.set(server.id, job);
+      }
+    } catch (error) {
+      storageErrors[`incidents:${server.id}`] = 'Incident evidence processing failed; review Diagnostics status.';
+      console.error(`Incident processing failed for ${server.id}: ${redactSqlDiagnostic(error.message, server)}`);
+    }
+  },
   onError: (server, error) => observeEmail(server, null, { error }),
 });
-function configureEmailMonitoring(settings) {
+async function configureMonitoring() {
+  const settings = await monitorOperations.settings();
+  sqlProcessLimiter.configure(settings.maxConcurrent);
+  await historical.configure(settings.history);
+  monitor.configure({
+    enabled: settings.enabled || emailMonitoringEnabled,
+    intervalSeconds: settings.enabled && emailMonitoringEnabled ? Math.min(settings.intervalSeconds, emailMonitoringInterval)
+      : settings.enabled ? settings.intervalSeconds : emailMonitoringInterval,
+    maxConcurrent: settings.maxConcurrent,
+  });
+  delete storageErrors.monitoring;
+  return settings;
+}
+async function configureEmailMonitoring(settings) {
   emailMonitoringEnabled = settings.enabled;
-  monitor.configure({ enabled: settings.enabled, intervalSeconds: settings.intervalSeconds });
+  emailMonitoringInterval = settings.intervalSeconds;
+  await configureMonitoring();
   return settings;
 }
 
@@ -766,30 +861,59 @@ function configureEmailMonitoring(settings) {
 // ==============================
 const HISTORY_DIR = path.join(DATA_DIR, 'history');
 await mkdir(HISTORY_DIR, { recursive: true });
-const MAX_HISTORY = 720;
-const historyStores = new Map();
-function historyStore(id) {
-  if (!/^[A-Za-z0-9_-]+$/.test(id)) throw requestError(400, 'invalid serverId');
-  if (!historyStores.has(id)) {
-    historyStores.set(id, createJsonStore(path.join(HISTORY_DIR, `${id}.json`), () => [], value => {
-      if (!Array.isArray(value)) throw new Error('History must be an array');
-    }));
-  }
-  return historyStores.get(id);
+const historical = createHistoryStore({ dataDir: DATA_DIR, serializeSample: extractHistorySample });
+let maintenanceJob, maintenanceSummary = null;
+async function maintainTelemetry() {
+  if (maintenanceJob) return maintenanceJob;
+  maintenanceJob = (async () => {
+    try {
+      const history = await historical.maintenance();
+      for (const [filename, cleanup] of [
+        ['incident-evidence.json', () => incidents.stats()],
+        ['alert-state.json', () => emailAlerts.history({ limit: 1 })],
+      ]) {
+        try { await access(path.join(DATA_DIR, filename)); }
+        catch (error) { if (error.code === 'ENOENT') continue; throw error; }
+        await cleanup();
+      }
+      maintenanceSummary = { completedAt: new Date().toISOString(), serversChecked: history.serversChecked,
+        checkpoints: history.checkpoints, historyRecoveryWarnings: history.recoveryWarnings.length };
+      delete storageErrors.maintenance;
+    } catch (error) {
+      storageErrors.maintenance = 'Local telemetry retention maintenance failed. Review disk access and history coverage.';
+      console.error(`Telemetry maintenance failed: ${redactSqlDiagnostic(error.message)}`);
+    }
+  })().finally(() => { maintenanceJob = null; });
+  return maintenanceJob;
 }
+const maintenanceTimer = setInterval(() => { void maintainTelemetry(); }, 3600000);
+maintenanceTimer.unref();
 async function loadHistory(id) {
-  return (await historyStore(id).read()).slice(-MAX_HISTORY);
+  return historical.latest(id, 720);
 }
 function extractHistorySample(data) {
   const i = data.instance || {};
-  const bhr = i.buffer_cache_hit_ratio_base > 0 ? (i.buffer_cache_hit_ratio*100/i.buffer_cache_hit_ratio_base) : 100;
+  const bhr = i.buffer_cache_hit_ratio_base > 0 && Number.isFinite(i.buffer_cache_hit_ratio)
+    ? (i.buffer_cache_hit_ratio*100/i.buffer_cache_hit_ratio_base) : null;
   const waits = data.waits || [];
   const totalWait = waits.reduce((s,w)=>s + (Number(w.wait_time_s)||0), 0);
   const totalSignal = waits.reduce((s,w)=>s + (Number(w.signal_wait_s)||0), 0);
+  const interval = data.intervals;
+  const io = interval?.file_io?.rows?.filter(row => row.status === 'ready') || [];
+  const sumIo = key => io.length ? io.reduce((sum,row) => sum + (Number.isFinite(row[key]) ? row[key] : 0), 0) : null;
+  const intervalMetrics = {
+    batchRequestsPerSec: interval?.rates?.batch_requests_per_sec ?? null,
+    compilationsPerSec: interval?.rates?.compilations_per_sec ?? null,
+    waitSecondsPerSec: interval?.waits?.status === 'ready' && interval.elapsedSeconds > 0 ? interval.waits.totalWaitS / interval.elapsedSeconds : null,
+    signalWaitPct: interval?.waits?.status === 'ready' ? interval.waits.signalPct : null,
+    readIops: sumIo('read_iops'), writeIops: sumIo('write_iops'),
+    avgReadLatencyMs: sumIo('reads') > 0 ? sumIo('read_stall_ms') / sumIo('reads') : null,
+    avgWriteLatencyMs: sumIo('writes') > 0 ? sumIo('write_stall_ms') / sumIo('writes') : null,
+  };
   const sample = {
     t: Number.isFinite(Date.parse(data.generated_at)) ? Date.parse(data.generated_at) : Date.now(),
     ple: i.page_life_expectancy ?? null,
-    bhr: Number(bhr.toFixed(2)),
+    bhr: bhr == null ? null : Number(bhr.toFixed(2)),
     memMb: i.memory_in_use_mb ?? null,
     sessions: i.user_sessions ?? null,
     active: i.active_requests ?? null,
@@ -801,19 +925,19 @@ function extractHistorySample(data) {
     memPct: i.avg_memory_percent ?? null,
     ioPct: i.avg_data_io_percent ?? null,
     logPct: i.avg_log_write_percent ?? null,
+    intervalMetrics,
+    counterReset: ['waits','file_io','rates'].some(key => /reset|restart/.test(interval?.[key]?.reason || '')),
+    reset: ['waits','file_io','rates'].some(key => /reset|restart|connection|engine/.test(interval?.[key]?.reason || '')),
     // Custom counter values (id -> number)
     custom: {},
   };
   for (const cc of (data.custom_counters || [])) {
-    if (typeof cc.value === 'number') sample.custom[cc.id] = cc.value;
+    if (cc.enabled !== false && !cc.stale && !cc.error && typeof cc.value === 'number' && Number.isFinite(cc.value)) sample.custom[cc.id] = cc.value;
   }
   return sample;
 }
 async function appendHistory(id, data) {
-  await historyStore(id).update(arr => {
-    arr.push(extractHistorySample(data));
-    if (arr.length > MAX_HISTORY) arr.splice(0, arr.length - MAX_HISTORY);
-  });
+  await historical.append(id, data);
 }
 
 // ==============================
@@ -921,6 +1045,10 @@ const aiPreviews = createAiPreviewStore({
   getMetrics: stored => getMetricsFor(stored, 60000),
   getSnapshot: (stored, sampledAt) => metricsCollector.snapshot(stored, sampledAt),
   loadHistory, buildContext: buildAiContext,
+  getHistoricalContext: async (stored, selected) => ({
+    ...await historical.context(stored.id, { ...selected, limit: 60 }),
+    comparison: await historical.compare(stored.id, selected),
+  }),
 });
 const assets = new Map([
   ['/health.js', ['health.js', 'text/javascript; charset=utf-8']],
@@ -938,6 +1066,14 @@ const assets = new Map([
   ['/ai-ui.js', ['ai-ui.js', 'text/javascript; charset=utf-8']],
   ['/ai-ui.css', ['ai-ui.css', 'text/css; charset=utf-8']],
   ['/disclaimer-ui.js', ['disclaimer-ui.js', 'text/javascript; charset=utf-8']],
+  ['/operations-ui.js', ['operations-ui.js', 'text/javascript; charset=utf-8']],
+  ['/operations-ui.css', ['operations-ui.css', 'text/css; charset=utf-8']],
+  ['/history-ui.js', ['history-ui.js', 'text/javascript; charset=utf-8']],
+  ['/history-ui.css', ['history-ui.css', 'text/css; charset=utf-8']],
+  ['/diagnostics-ui.js', ['diagnostics-ui.js', 'text/javascript; charset=utf-8']],
+  ['/diagnostics-ui.css', ['diagnostics-ui.css', 'text/css; charset=utf-8']],
+  ['/alerts-operations-ui.js', ['alerts-operations-ui.js', 'text/javascript; charset=utf-8']],
+  ['/alerts-operations-ui.css', ['alerts-operations-ui.css', 'text/css; charset=utf-8']],
   ['/favicon.ico', ['sql-dashboard-app.ico', 'image/x-icon']],
   ['/sql-dashboard-logo.png', ['sql-dashboard-logo.png', 'image/png']],
 ]);
@@ -975,6 +1111,54 @@ const server = http.createServer(async (req, res) => {
       const list = await loadServers();
       return json(res, 200, list.map(publicView));
     }
+    if (p === '/api/service-health' && req.method === 'GET') {
+      return json(res, 200, { status: 'ok', heartbeat: heartbeatAt, pid: process.pid });
+    }
+    if (p === '/api/service-stop' && req.method === 'POST') {
+      const expected = process.env.SQL_PULSE_SERVICE_TOKEN;
+      const supplied = req.headers['x-sql-pulse-service-token'];
+      if (process.env.SQL_PULSE_SERVICE_MODE !== '1' || !expected || typeof supplied !== 'string'
+        || Buffer.byteLength(supplied) !== Buffer.byteLength(expected)
+        || !crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(expected))) throw requestError(403, 'Service stop is not authorized');
+      json(res, 200, { ok: true });
+      scheduleShutdown();
+      return;
+    }
+    if (p.startsWith('/api/monitor/') || p.startsWith('/api/diagnostics/')) {
+      if (req.method === 'POST' && !/^application\/json(?:;|$)/i.test(req.headers['content-type'] || '')) {
+        throw requestError(415, 'Monitoring and diagnostics requests require application/json');
+      }
+      if (p === '/api/monitor/settings' && req.method === 'GET') return json(res, 200, await monitorOperations.settings());
+      if (p === '/api/monitor/settings' && req.method === 'POST') {
+        const previous = await monitorOperations.settings();
+        const next = await monitorOperations.save(await readBody(req));
+        await configureMonitoring();
+        if (JSON.stringify(previous.collection) !== JSON.stringify(next.collection)) {
+          for (const stored of await loadServers()) sectionCollector.invalidate(stored.id);
+        }
+        return json(res, 200, next);
+      }
+      if (p === '/api/monitor/status' && req.method === 'GET') return json(res, 200, await operationsStatus());
+      if (p === '/api/diagnostics/settings' && req.method === 'GET') return json(res, 200, await incidents.settings());
+      if (p === '/api/diagnostics/settings' && req.method === 'POST') return json(res, 200, await incidents.configure(await readBody(req)));
+      if (p.startsWith('/api/diagnostics/') && req.method === 'GET') {
+        const id = url.searchParams.get('serverId');
+        findServer(await loadServers(), id);
+        if (p === '/api/diagnostics/status') return json(res, 200, await incidents.status(id));
+        if (p === '/api/diagnostics/incidents') return json(res, 200, await incidents.list(id, {
+          type: url.searchParams.get('type') || undefined,
+          since: url.searchParams.get('since') || undefined, until: url.searchParams.get('until') || undefined,
+          limit: url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : undefined,
+        }));
+        const detail = p.match(/^\/api\/diagnostics\/incidents\/([A-Za-z0-9_-]+)$/);
+        if (detail) return json(res, 200, await incidents.detail(id, detail[1]));
+      }
+      if (p === '/api/diagnostics/collect' && req.method === 'POST') {
+        const body = await readBody(req), stored = findServer(await loadServers(), body.serverId);
+        if (stored.monitoringPaused) throw requestError(409, 'Monitoring is paused for this server');
+        return json(res, 200, await incidents.collect(stored));
+      }
+    }
     if (p.startsWith('/api/alerts/')) {
       if (req.method === 'POST' && !/^application\/json(?:;|$)/i.test(req.headers['content-type'] || '')) {
         throw requestError(415, 'Email settings requests require application/json');
@@ -990,14 +1174,20 @@ const server = http.createServer(async (req, res) => {
         return json(res, 200, await microsoftEmailAuth.cancelLogin(await readBody(req)));
       }
       if (p === '/api/alerts/settings' && req.method === 'GET') return json(res, 200, await emailAlerts.settings());
+      if (p === '/api/alerts/history' && req.method === 'GET') {
+        return json(res, 200, await emailAlerts.history({ limit: url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : 100 }));
+      }
+      if (p === '/api/alerts/incidents' && req.method === 'GET') return json(res, 200, await emailAlerts.incidents());
+      if (p === '/api/alerts/acknowledge' && req.method === 'POST') return json(res, 200, await emailAlerts.acknowledge(await readBody(req)));
+      if (p === '/api/alerts/acknowledgement-clear' && req.method === 'POST') return json(res, 200, await emailAlerts.clearAcknowledgement(await readBody(req)));
       if (p === '/api/alerts/settings' && req.method === 'POST') {
-        return json(res, 200, configureEmailMonitoring(await emailAlerts.saveSettings(await readBody(req))));
+        return json(res, 200, await configureEmailMonitoring(await emailAlerts.saveSettings(await readBody(req))));
       }
       if (p === '/api/alerts/settings-preview' && req.method === 'POST') {
         return json(res, 200, await emailAlerts.prepareSettingsPreview(await readBody(req)));
       }
       if (p === '/api/alerts/settings-apply' && req.method === 'POST') {
-        return json(res, 200, configureEmailMonitoring(await emailAlerts.applySettings(await readBody(req))));
+        return json(res, 200, await configureEmailMonitoring(await emailAlerts.applySettings(await readBody(req))));
       }
       if (p === '/api/alerts/test-preview' && req.method === 'POST') {
         return json(res, 200, await emailAlerts.prepareTestPreview(await readBody(req)));
@@ -1338,24 +1528,37 @@ FOR JSON PATH, WITHOUT_ARRAY_WRAPPER;
 // ==============================
     if (p === '/api/history' && req.method === 'GET') {
       const id = url.searchParams.get('serverId');
-      const limit = Math.min(720, Math.max(1, parseInt(url.searchParams.get('limit')||'120', 10)));
+      const limit = Number(url.searchParams.get('limit') || 120);
       if (!id) return json(res, 400, { error: 'serverId required' });
+      if (!Number.isInteger(limit) || limit < 1 || limit > 720) throw requestError(400, 'History limit must be 1-720');
+      findServer(await loadServers(), id);
       const arr = await loadHistory(id);
       return json(res, 200, arr.slice(-limit));
+    }
+    if (p.startsWith('/api/history/') && req.method === 'GET') {
+      const id = url.searchParams.get('serverId');
+      findServer(await loadServers(), id);
+      const options = {
+        from: url.searchParams.get('from') || undefined, to: url.searchParams.get('to') || undefined,
+        resolution: url.searchParams.get('resolution') || 'auto',
+        limit: url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : undefined,
+        baseline: url.searchParams.get('baseline') || 'day',
+      };
+      if (p === '/api/history/range') return json(res, 200, await historical.query(id, options));
+      if (p === '/api/history/compare') return json(res, 200, await historical.compare(id, options));
+      if (p === '/api/history/context') return json(res, 200, await historical.context(id, options));
+      if (p === '/api/history/status') return json(res, 200, await historical.status(id));
     }
 
     // ==============================
     // Shutdown: stop the running dashboard server
     // ==============================
     if (p === '/api/shutdown' && req.method === 'POST') {
+      if (process.env.SQL_PULSE_SERVICE_MODE === '1') throw requestError(409, 'SQL Pulse is running as a Windows service. Stop its SQL Pulse entry in Windows Services, or use the packaged Uninstall-Service.ps1 to remove service mode.');
       json(res, 200, { ok: true, message: 'Shutting down…' });
       console.log('Shutdown requested via /api/shutdown');
       // Give the response a moment to flush, then close the HTTP server + exit
-      setTimeout(() => {
-        try { server.close(() => process.exit(0)); } catch { process.exit(0); }
-        // Hard fallback if close() hangs on live sockets
-        setTimeout(() => process.exit(0), 1500);
-      }, 250);
+      scheduleShutdown();
       return;
     }
 
@@ -1453,6 +1656,7 @@ SELECT CAST(query_plan AS NVARCHAR(MAX)) AS xml_plan FROM sys.dm_exec_query_plan
       res.end('ok');
       return;
     }
+    if (p === '/health/details' && req.method === 'GET') return json(res, 200, await operationsStatus());
 
     res.writeHead(404); res.end('not found');
   } catch (e) {
@@ -1465,17 +1669,79 @@ SELECT CAST(query_plan AS NVARCHAR(MAX)) AS xml_plan FROM sys.dm_exec_query_plan
   }
 });
 
-server.listen(PORT, '127.0.0.1', () => {
+async function operationsStatus() {
+  let snapshot, settings, inventoryAvailable = true;
+  try {
+    snapshot = await monitor.snapshot();
+    delete storageErrors.registry;
+  } catch (error) {
+    inventoryAvailable = false;
+    storageErrors.registry = 'Server inventory could not be read; collection state is unavailable. Repair the registry or credential access.';
+    snapshot = { servers: [], monitor: monitor.stats() };
+  }
+  try {
+    settings = await monitorOperations.settings();
+    delete storageErrors.monitorSettings;
+  } catch (error) {
+    storageErrors.monitorSettings = 'Monitoring settings could not be read. Repair monitor-settings.json before changing collection.';
+  }
+  const usage = process.cpuUsage();
+  return {
+    ...monitorHealth(snapshot, { heartbeatAt, storageErrors: { ...storageErrors } }),
+    inventoryAvailable,
+    ...(!inventoryAvailable ? { servers: { total: null, unavailable: null, pending: null, paused: null } } : {}),
+    pollingSource: !settings ? 'Monitoring configuration unavailable' : settings.enabled
+      ? emailMonitoringEnabled ? 'Independent monitoring + notifications' : 'Independent monitoring'
+      : emailMonitoringEnabled ? 'Approved notification monitoring' : 'Browser viewing only',
+    process: { pid: process.pid, uptimeSeconds: Math.round(process.uptime()), rssMb: Math.round(process.memoryUsage().rss / 1048576),
+      cpuMs: Math.round((usage.user + usage.system) / 1000), serviceMode: process.env.SQL_PULSE_SERVICE_MODE === '1' },
+    sqlProcesses: sqlProcessLimiter.stats(), collector: metricsCollector.stats(),
+    pendingDiagnostics: incidentJobs.size,
+    maintenance: maintenanceSummary,
+  };
+}
+server.listen(PORT, '127.0.0.1', async () => {
   console.log(`SQL Pulse listening on http://127.0.0.1:${server.address().port}`);
-  emailAlerts.settings().then(configureEmailMonitoring).catch(() => {
+  try {
+    const settings = await emailAlerts.settings();
+    emailMonitoringEnabled = settings.enabled;
+    emailMonitoringInterval = settings.intervalSeconds;
+  } catch (error) {
     emailMonitoringEnabled = false;
-    monitor.configure({ enabled: false });
+    storageErrors.email = 'Email settings could not be loaded; approved email delivery is not running.';
     console.error('Email monitoring is disabled: settings or alert state could not be read. Review Email alerts settings.');
-  });
+  }
+  try { await configureMonitoring(); }
+  catch (error) {
+    storageErrors.monitoring = 'Monitoring configuration could not be applied; review Monitoring & history.';
+    console.error(`Monitoring startup failed: ${redactSqlDiagnostic(error.message)}`);
+  }
+  void maintainTelemetry();
 });
+let stopping = false;
+function scheduleShutdown() {
+  if (stopping) return;
+  stopping = true;
+  monitor.stop();
+  shutdownController.abort(new Error('SQL Pulse is shutting down'));
+  const timeout = setTimeout(() => process.exit(1), 30000);
+  timeout.unref();
+  setTimeout(async () => {
+    const closing = Promise.allSettled([emailAlerts.close(), microsoftEmailAuth.close(), ai.close()]);
+    await metricsCollector.idle();
+    await monitor.idle();
+    const results = [...await closing, ...await Promise.allSettled([incidents.close(), ...incidentJobs.values(), maintenanceJob])];
+    for (const result of results) if (result.status === 'rejected') console.error('Service cleanup failed:', redactSqlDiagnostic(result.reason?.message || 'Cleanup failed'));
+    server.close(() => { clearTimeout(timeout); process.exit(results.some(result => result.status === 'rejected') ? 1 : 0); });
+    server.closeIdleConnections();
+  }, 100);
+}
 server.on('close', () => {
+  clearInterval(heartbeatTimer);
+  clearInterval(maintenanceTimer);
   monitor.stop();
   emailMonitoringEnabled = false;
+  if (stopping) return;
   emailAlerts.close().catch(() => console.error('Email service cleanup failed.'));
   microsoftEmailAuth.close().catch(() => console.error('Microsoft email sign-in cleanup failed.'));
   ai.close().catch(error => console.error(`AI cleanup failed: ${error.message}`));

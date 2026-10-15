@@ -16,7 +16,7 @@ function invalid(message, status = 400) {
 }
 
 export function createAiPreviewStore({
-  ai, findServer, getMetrics, getSnapshot, loadHistory, buildContext,
+  ai, findServer, getMetrics, getSnapshot, loadHistory, buildContext, getHistoricalContext,
   now = Date.now, ttlMs = 5 * 60 * 1000, maxPreviews = 20, contextTtlMs = 30 * 60 * 1000,
 }) {
   const previews = new Map(), contexts = new Map();
@@ -39,7 +39,16 @@ export function createAiPreviewStore({
       || visualSampleAt.length > 64 || !Number.isFinite(Date.parse(visualSampleAt)))) throw invalid('Invalid visual sample timestamp.');
     const panelTitle = body.panelTitle?.trim() || VISUAL_SCOPES[scope] || 'Server overview';
     if (typeof serverId !== 'string' || !serverId || serverId.length > 128) throw invalid('A valid server is required.');
-    return { serverId, scope, metricId, visualSampleAt, panelTitle };
+    let window;
+    if (scope === 'history') {
+      const from = typeof body.from === 'number' ? body.from : Date.parse(body.from);
+      const to = typeof body.to === 'number' ? body.to : Date.parse(body.to);
+      const baseline = body.baseline || 'day';
+      if (!Number.isFinite(from) || !Number.isFinite(to) || from >= to || to - from > 90 * 86400000
+        || to > now() + 60000 || !['previous', 'day', 'week'].includes(baseline)) throw invalid('Select a valid historical window of at most 90 days.');
+      window = { from, to, baseline };
+    }
+    return { serverId, scope, metricId, visualSampleAt, panelTitle, ...window };
   }
 
   async function capture(body) {
@@ -47,14 +56,23 @@ export function createAiPreviewStore({
     const server = await findServer(selected.serverId);
     if (!server) throw invalid('Server not found.', 404);
     const serverFingerprint = fingerprint(server);
-    const data = getSnapshot
-      ? await getSnapshot(server, selected.visualSampleAt) : await getMetrics(server);
-    if (!data) throw invalid('No collected snapshot is available. Refresh the dashboard before capturing context.', 409);
-    const snapshotTime = Date.parse(data.generated_at);
-    const history = ['all', 'timeline', 'custom_counters'].includes(selected.scope)
-      ? (await loadHistory(selected.serverId)).filter(row => !Number.isFinite(snapshotTime) || row.t <= snapshotTime) : [];
-    const context = structuredClone(selected.scope === 'all'
-      ? buildContext(data, history) : selectVisualContext(data, history, selected));
+    let data, context;
+    if (selected.scope === 'history') {
+      if (!getHistoricalContext) throw invalid('Historical AI context is not available.', 409);
+      context = structuredClone(await getHistoricalContext(server, selected));
+      if (!Array.isArray(context.points) || !context.points.length) throw invalid('No persisted measurements exist in this historical window.', 409);
+      const latest = context.points.at(-1)?.t;
+      data = { generated_at: Number.isFinite(latest) ? new Date(latest).toISOString() : null };
+      context.sampledAt = data.generated_at;
+    } else {
+      data = getSnapshot ? await getSnapshot(server, selected.visualSampleAt) : await getMetrics(server);
+      if (!data) throw invalid('No collected snapshot is available. Refresh the dashboard before capturing context.', 409);
+      const snapshotTime = Date.parse(data.generated_at);
+      const history = ['all', 'timeline', 'custom_counters'].includes(selected.scope)
+        ? (await loadHistory(selected.serverId)).filter(row => !Number.isFinite(snapshotTime) || row.t <= snapshotTime) : [];
+      context = structuredClone(selected.scope === 'all'
+        ? buildContext(data, history) : selectVisualContext(data, history, selected));
+    }
     const currentServer = await findServer(selected.serverId);
     if (!currentServer || fingerprint(currentServer) !== serverFingerprint) throw invalid('Server changed while capturing context. Refresh context.', 409);
     const contextBytes = Buffer.byteLength(JSON.stringify(context), 'utf8');
@@ -93,6 +111,9 @@ export function createAiPreviewStore({
     if (contextId !== undefined && !captured) throw invalid('Context expired. Use Refresh context to continue.', 409);
     if (captured && (captured.serverId !== serverId || captured.scope !== scope || captured.metricId !== metricId)) {
       throw invalid('Context does not match the selected server or visual.', 409);
+    }
+    if (scope === 'history' && (!captured || captured.from !== selected.from || captured.to !== selected.to || captured.baseline !== selected.baseline)) {
+      throw invalid('Capture the selected historical window before reviewing this question.', 409);
     }
     if (captured?.sending) throw invalid('An answer for this conversation is still running.', 409);
     const settings = await ai.settings();

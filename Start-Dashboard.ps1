@@ -8,17 +8,26 @@ $entryPoint = Join-Path $installDir 'server.mjs'
 try {
     $env:PATH = [Environment]::GetEnvironmentVariable('PATH','Machine') + ';' +
         [Environment]::GetEnvironmentVariable('PATH','User') + ';' + $env:PATH
+    . (Join-Path $installDir 'ToolPaths.ps1')
+    . (Join-Path $installDir 'Dashboard-Lifecycle.ps1')
+    $script:SqlPulseToolDirectory = $installDir
+    $service = Get-SqlPulseService $installDir
+    if ($service -and $service.SqlPulseDataDirectory) { $env:SQL_DASHBOARD_DATA_DIR = [IO.Path]::GetFullPath($service.SqlPulseDataDirectory) }
+    $serviceHosting = $service -and $service.Status -ne 'Stopped'
     $existing = @(Get-NetTCPConnection -LocalPort 8765 -State Listen -ErrorAction SilentlyContinue)
     if ($existing.Count -gt 0) {
         foreach ($processId in @($existing.OwningProcess | Select-Object -Unique)) {
             $process = Get-CimInstance Win32_Process -Filter "ProcessId = $processId"
             if (-not $process -or $process.Name -ne 'node.exe' -or
-                $process.CommandLine -notmatch [regex]::Escape($entryPoint)) {
+                $process.CommandLine -notmatch ('(?i)(?:^|\s)"?' + [regex]::Escape($entryPoint) + '"?(?=\s|$)')) {
                 throw 'Port 8765 is used by another application. Nothing was stopped.'
             }
         }
-    } else {
-        $node = (Get-Command node.exe -ErrorAction Stop).Source
+    } elseif (-not $serviceHosting) {
+        $tool = Find-UsableTool 'node'
+        if (-not $tool) { throw 'Supported Node.js (20.19.x or >=22.12) with npm is unavailable. Rerun the installer to repair it.' }
+        $node = $tool.Path
+        Update-ToolPath @((Split-Path $node))
         $started = Start-Process -FilePath $node -ArgumentList "`"$entryPoint`"" -WorkingDirectory $installDir -WindowStyle Hidden `
             -RedirectStandardOutput (Join-Path $installDir 'server.log') `
             -RedirectStandardError $errorLog -PassThru

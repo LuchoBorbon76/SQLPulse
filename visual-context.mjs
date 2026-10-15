@@ -2,7 +2,7 @@ export const VISUAL_SCOPES = Object.freeze({
   instance: 'Instance metrics', timeline: 'Performance timeline', blocking: 'Blocking sessions',
   active: 'Active requests', waiters: 'Waiting tasks', waits: 'Wait statistics', latches: 'Latch statistics',
   buffer_pool: 'Buffer pool', file_io: 'File I/O', databases: 'Databases', top_queries: 'Top queries',
-  missing_indexes: 'Missing indexes', tempdb: 'TempDB', custom_counters: 'Custom counter',
+  missing_indexes: 'Missing indexes', tempdb: 'TempDB', custom_counters: 'Custom counter', history: 'Historical investigation',
 });
 
 const INSTANCE_FIELDS = [
@@ -26,7 +26,7 @@ const LABEL_ALIASES = {
   'Page Life Expectancy': 'ple', 'Buffer Cache Hit Ratio': 'bhr', 'Memory In Use': 'memMb',
   'Sessions / Connections': 'sessions', 'Active Requests': 'active', 'Avg CPU %': 'cpuPct',
   'Avg Memory %': 'memPct', 'Data I/O %': 'ioPct', 'Log Write %': 'logPct',
-  'Batch Requests (cum)': 'batch', 'CPU Cores': 'cpu', 'Uptime': 'uptime',
+  'Batch Requests (cum)': 'batch', 'Batch Requests / sec': 'batch', 'CPU Cores': 'cpu', 'Uptime': 'uptime',
   'Product Version': 'version', 'Engine Edition': 'engine',
 };
 const SERIES = ['ple', 'bhr', 'memMb', 'sessions', 'active', 'cpuPct', 'memPct', 'ioPct', 'logPct'];
@@ -87,6 +87,7 @@ export function validateVisualSelection({ scope, metricId } = {}) {
 
 export function selectVisualContext(data, history, { scope, metricId } = {}) {
   validateVisualSelection({ scope, metricId });
+  if (scope === 'history') throw invalid('Historical context must be captured from the persisted selected time window.');
   if (scope === 'all') throw invalid('General context must use the legacy context builder.');
   data ||= {};
   const context = {
@@ -102,6 +103,17 @@ export function selectVisualContext(data, history, { scope, metricId } = {}) {
       'stale', 'intervalSeconds', 'lookbackHours', 'error', 'message']);
   context.sampledAt = metadata && Object.hasOwn(metadata, 'sampledAt')
     ? context.sectionMetadata[scope].sampledAt ?? null : context.generated_at ?? null;
+  if (data.intervals && ['instance','timeline','waits','file_io'].includes(scope)) {
+    context.intervals = pick(data.intervals, ['startedAt', 'sampledAt', 'elapsedSeconds', 'restartIdentityAvailable']);
+    const intervalKeys = scope === 'waits' ? ['waits'] : scope === 'file_io' ? ['file_io'] : ['rates'];
+    for (const key of intervalKeys) {
+      const section = data.intervals[key];
+      if (!section) continue;
+      context.intervals[key] = pick(section, ['status', 'reason', 'applicable', 'totalWaitS', 'totalSignalS', 'signalPct', 'batch_requests_per_sec', 'compilations_per_sec']);
+      if (Array.isArray(section.rows)) context.intervals[key].rows = section.rows.slice(0, 20).map(row => pick(row, key === 'waits'
+        ? ROW_FIELDS.waits : [...ROW_FIELDS.file_io, 'database_id', 'file_id', 'status', 'reason', 'read_iops', 'write_iops']));
+    }
+  }
   if (scope === 'instance') return context;
   if (scope === 'timeline') {
     const series = metricId === undefined

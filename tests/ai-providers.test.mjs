@@ -35,6 +35,7 @@ async function fixture(t, overrides = {}) {
     env: {}, fetchImpl, timeoutMs: 100, discoveryTimeoutMs: 100,
     platform: 'linux', loginPollMs: 10, cleanupTimeoutMs: 100, logger: { warn() {} },
     execFileImpl: async () => { throw new Error('CLI unavailable'); },
+    resolveToolPathImpl: name => `C:\\Verified Tools\\${name}${name === 'az' ? '.cmd' : '.exe'}`,
     ...overrides,
   });
   t.after(async () => { await service.close(); await rm(dir, { recursive: true, force: true }); });
@@ -194,7 +195,7 @@ test('Azure Entra uses safe exec arguments and Cognitive Services token audience
   } });
   await service.saveSettings({ providerId: 'azure-openai', config: { baseUrl: 'https://resource.openai.azure.com', deployment: 'customer-deployment', authMode: 'entra' } });
   await service.chat({ ...prompt });
-  assert.equal(commands[0][0], 'az');
+  assert.equal(commands[0][0], 'C:\\Verified Tools\\az.cmd');
   assert.deepEqual(commands[0][1], ['account', 'get-access-token', '--resource', 'https://cognitiveservices.azure.com', '--output', 'json']);
   assert.equal(calls[0].headers.Authorization, 'Bearer entra-access-token');
   assert.equal(calls[0].payload.model, 'customer-deployment');
@@ -215,9 +216,50 @@ test('Windows Azure CLI invokes az.cmd with fixed arguments, never user input', 
   await service.saveSettings({ providerId: 'azure-openai', config: { baseUrl: 'https://resource.openai.azure.com', deployment: 'customer-deployment' } });
   await service.chat({ ...prompt });
   assert.equal(commands[0][0], 'cmd.exe');
-  assert.deepEqual(commands[0][1], ['/d', '/s', '/c', 'az.cmd account get-access-token --resource https://cognitiveservices.azure.com --output json']);
+  assert.deepEqual(commands[0][1], ['/d', '/s', '/c', '""C:\\Verified Tools\\az.cmd" account get-access-token --resource https://cognitiveservices.azure.com --output json"']);
+  assert.equal(commands[0][2].windowsVerbatimArguments, true);
   assert.ok(!commands[0][1].join(' ').includes('customer-deployment'));
   assert.equal(calls[0].headers.Authorization, 'Bearer entra-token');
+});
+
+test('a verified Azure executable is invoked directly on Windows and receives resolver environment', async t => {
+  const commands = [], lookups = [], env = { Path: 'C:\\Verified Tools', ComSpec: 'C:\\Windows\\System32\\cmd.exe' };
+  const { service } = await fixture(t, {
+    platform: 'win32', env,
+    resolveToolPathImpl: (name, options) => { lookups.push({ name, env: options.env }); return 'C:\\Verified Tools\\az.exe'; },
+    execFileImpl: async (...args) => { commands.push(args); return { stdout: '{"accessToken":"synthetic-token"}' }; },
+  });
+  await service.saveSettings({ providerId: 'azure-openai', config: { baseUrl: 'https://resource.openai.azure.com', deployment: 'deployment' } });
+  await service.chat({ ...prompt });
+  assert.equal(commands[0][0], 'C:\\Verified Tools\\az.exe');
+  assert.equal(commands[0][2].windowsVerbatimArguments, false);
+  assert.equal(commands[0][1][0], 'account');
+  assert.deepEqual(lookups, [{ name: 'az', env }]);
+});
+
+test('missing or shell-unsafe verified Azure paths fail explicitly without an unverified fallback', async t => {
+  for (const path of [null, 'az.cmd', 'C:\\Private%PATH%\\az.cmd', 'C:\\Private!PATH!\\az.cmd']) {
+    const { service, calls } = await fixture(t, {
+      platform: 'win32', resolveToolPathImpl: () => path,
+      execFileImpl: async () => assert.fail('An unresolved executable must never run'),
+    });
+    await service.saveSettings({ providerId: 'azure-openai', config: { baseUrl: 'https://resource.openai.azure.com', deployment: 'deployment' } });
+    await assert.rejects(service.chat({ ...prompt }), /verified Azure CLI executable was not found/);
+    assert.equal(calls.length, 0);
+  }
+});
+
+test('missing verified GitHub CLI fails sign-in before exec or spawn and retains existing credentials', async t => {
+  const { service } = await fixture(t, {
+    resolveToolPathImpl: () => null,
+    execFileImpl: async () => assert.fail('An unresolved executable must never run'),
+    spawnImpl: () => assert.fail('An unresolved executable must never spawn'),
+  });
+  await service.saveSettings({ providerId: 'github', config: { secret: 'previous-working-token' } });
+  const result = await service.startGitHubLogin({ switchAccount: true });
+  assert.equal(result.state, 'failed');
+  assert.match(result.error, /verified GitHub CLI executable was not found/);
+  assert.equal((await service.settings()).configs.github.hasSecret, true);
 });
 
 test('discovery HTTP failures are errors, not fabricated model catalogs', async t => {
@@ -325,8 +367,9 @@ test('GitHub sign-in gates token polling on code, captures partial code, never l
   token = 'new-token'; child.emit('close', 0);
   assert.equal((await waitLogin(service)).state, 'succeeded');
   assert.ok(commands.every(c => !c.args.includes('logout')));
+  assert.ok(commands.every(c => c.exe === 'C:\\Verified Tools\\gh.exe'));
   const launch = commands.find(c => c.spawn);
-  assert.equal(launch.exe, 'gh'); assert.ok(launch.args.includes('--clipboard'));
+  assert.equal(launch.exe, 'C:\\Verified Tools\\gh.exe'); assert.ok(launch.args.includes('--clipboard'));
   assert.equal(launch.opts.env.GH_TOKEN, undefined);
   assert.equal(sdk.record.options.gitHubToken, 'new-token');
   assert.ok(!JSON.stringify(service.loginStatus()).includes('new-token'));
@@ -336,12 +379,51 @@ test('GitHub account switch rejects unchanged token, sign-in timeout cleans chil
   const unchanged = childMock(), { service } = await fixture(t, {
     spawnImpl: () => unchanged, execFileImpl: async () => ({ stdout: 'old-token' }),
   });
+
   await service.startGitHubLogin({ switchAccount: true });
   unchanged.stderr.emit('data', 'ABCD-1234'); unchanged.emit('close', 0);
   assert.equal((await waitLogin(service)).state, 'failed');
   const child = childMock(), timed = await fixture(t, { spawnImpl: () => child, loginTimeoutMs: 15 });
   await timed.service.startGitHubLogin({});
   assert.equal((await waitLogin(timed.service)).state, 'failed'); assert.equal(child.killed, true);
+});
+
+test('failed GitHub switching retains the previously working encrypted credential and auth source', async t => {
+    const sdk = sdkMock();
+    const { service } = await fixture(t, {
+      ...sdk, spawnImpl: () => { throw Object.assign(new Error('missing'), { code: 'ENOENT' }); },
+    });
+    await service.saveSettings({ providerId: 'github', config: { secret: 'previous-working-token', model: 'auto' } });
+    await service.startGitHubLogin({ switchAccount: true });
+    assert.equal(service.loginStatus().state, 'failed');
+    assert.equal((await service.settings()).configs.github.hasSecret, true);
+    assert.equal((await service.settings()).githubAuthSource, 'automatic');
+    await service.status('github');
+    assert.equal(sdk.record.options.gitHubToken, 'previous-working-token');
+});
+
+test('successful GitHub CLI account preference survives restart despite an environment credential', async t => {
+    const child = childMock(), sdk = sdkMock(); let token = 'previous-cli-token';
+    const { service, dir } = await fixture(t, {
+      ...sdk, env: { GH_TOKEN: 'environment-account' }, spawnImpl: () => child,
+      execFileImpl: async () => ({ stdout: token }),
+    });
+    await service.startGitHubLogin({ switchAccount: true });
+    token = 'chosen-cli-account'; child.stderr.emit('data', 'ABCD-1234');
+    assert.equal((await waitLogin(service)).state, 'succeeded');
+    assert.equal((await service.settings()).githubAuthSource, 'cli');
+    await service.close();
+    const restartedSdk = sdkMock();
+    const restarted = createAiProviders({
+      ...restartedSdk, settingsFile: join(dir, 'ai-settings.json'), env: { GH_TOKEN: 'environment-account' },
+      resolveToolPathImpl: () => 'C:\\Verified Tools\\gh.exe',
+      encryptSecret: async () => assert.fail('No encryption needed'), decryptSecret: async () => assert.fail('CLI preference ignores encrypted secrets'),
+      execFileImpl: async () => ({ stdout: token }),
+    });
+    t.after(() => restarted.close());
+    await restarted.status('github');
+    assert.equal(restartedSdk.record.options.gitHubToken, 'chosen-cli-account');
+    assert.equal((await restarted.settings()).configs.github.hasEnvironmentSecret, false);
 });
 
 test('GitHub token polling verifies access then kills a still-waiting CLI child', async t => {
@@ -429,7 +511,8 @@ test('GitHub login does not claim success if process cleanup fails and reports a
     ...sdk, logger: { warn: message => warnings.push(message) },
     execFileImpl: async () => ({ stdout: ++probes === 1 ? '' : 'login-token' }), spawnImpl: () => child,
   });
-  await service.startGitHubLogin({});
+  await service.saveSettings({ providerId: 'github', config: { secret: 'previous-working-token' } });
+  await service.startGitHubLogin({ switchAccount: true });
   child.stdout.emit('data', 'ABCD-1234');
   const result = await waitLogin(service);
   assert.equal(result.state, 'failed');
@@ -437,6 +520,8 @@ test('GitHub login does not claim success if process cleanup fails and reports a
   assert.ok(warnings.length > 0);
   assert.ok(!JSON.stringify(result).includes('SECRET'));
   assert.ok(!warnings.join('\n').includes('SECRET'));
+  assert.equal((await service.settings()).configs.github.hasSecret, true);
+  assert.equal((await service.settings()).githubAuthSource, 'automatic');
 });
 
 test('GitHub Free gets auto when the SDK catalog is empty; unsupported effort metadata stays disabled', async t => {

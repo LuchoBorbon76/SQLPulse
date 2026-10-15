@@ -22,13 +22,54 @@ Created by **Luis Fernando Borbon** · MIT License
 - **AI settings and visual assistance** — Configure AI provider in Settings; Ask AI on each chart, KPI and custom-counter card sends only the selected visual's reviewed context
 - **Review before sending** — preview the complete question, system prompt, SQL context, and destination; only the approved payload is sent
 - **Reliable persistence and refresh** — atomic, serialized configuration updates; shared in-flight collection across tabs; independent refreshes when switching servers
-- **Trend history and custom counters** — up to 720 persisted samples per server, sparklines, thresholds, and browser-local alert transitions
+- **Historical investigation and custom counters** — bounded persistent raw samples and hourly rollups, configurable retention, selected-window charts/comparisons, sparklines, thresholds, and browser-local alert transitions
 - **Professional desktop launcher** — original nine-size high-DPI icon, concise SQL Pulse shortcut, no terminal flash, and startup readiness checks
 - **Responsible-use notice** — shown before first use in each browser and available again under About and disclaimer
 - **Compact connection editor** — wider two-column desktop layout, wrapped diagnostics, manual database entry, and explicit SQL Server / Azure SQL Database / Managed Instance selection
 - **Email notifications** — encrypted SMTP configuration, recipients, warning/critical/recovery triggers, persistent deduplication and explicit template approval; disabled by default
 - **Lightweight counters** — engine-specific templates, independent sampling intervals, pause/enable, strict numeric tests, threshold validation, and bounded query execution
 - **Service identification** — SQL Server, Azure SQL Database, and Azure SQL Managed Instance badges in overview, sidebar, and details
+- **Independent unattended collection** — opt-in polling without an open browser or email, configurable concurrency/cadence, heartbeat and collector queue/resource visibility
+- **Current interval metrics** — reset-aware waits, file latency/IOPS, batch requests/sec and compilations/sec without an additional core SQL subprocess
+- **Optional incident evidence** — sleeping head blockers, existing system_health deadlocks, closed-window Query Store regressions and opt-in local plan history
+- **Notification operations** — sustained conditions, recovery hysteresis, opt-in escalation, UTC maintenance, acknowledgement expiry, sanitized delivery history and preview-approved generic/Slack/Teams/PagerDuty webhooks
+- **Optional Windows service** — same-user identity checks, owned-process lifecycle controls, recovery and host heartbeat supervision; explicit elevated setup, never silently enabled
+
+## Monitoring and investigation (v1.5)
+
+Open **Settings > Monitoring & history** to enable collection independently of notifications. The default is off; existing approved notification polling continues unchanged. SQL Pulse must be running and the host awake. Per-server pause still takes precedence. Global SQL concurrency is capped at two; a budget of one is available. Inventory defaults to five minutes and Query Store to two minutes. Buffer-pool descriptor scanning can be disabled for large instances.
+
+The panel reports heartbeat, active/queued work, recent collection p95, process memory/CPU time and local persistence errors. `/health` remains the lightweight readiness endpoint; `/health/details` adds collector self-health. Database failures mark monitoring degraded, not an unresponsive host; they do not cause restart loops.
+
+In a server's **History** dialog, select an hour/day/week or explicit time range, choose raw/hourly resolution, and compare with the previous window, yesterday or last week. Retention is configurable from 1-90 days, with 1-7 days of raw samples and hourly rollups afterward. Point/byte caps can shorten retained coverage and are reported explicitly. Durable append journals and periodic atomic checkpoints avoid rewriting a large history snapshot every sample; duplicate samples and unchanged maintenance do not write. The default per-server bound is 32 MiB snapshot plus 1 MiB journal, with four decoded servers cached. Retention maintenance also processes inactive servers on startup/hourly. Recovery warnings and persistence costs are available through `/api/history/status?serverId=...`; incomplete final journal records are reported, not silently treated as complete.
+
+Legacy `history/` files are migrated atomically and retained unchanged as backups, outside the active retention/size limits. They and installer backups require a separate owner-managed deletion policy. Missing measurements, collection gaps and counter resets are not zero. Hourly statistics are averages, not reconstructed point-in-time samples.
+
+Selected-window **Ask AI** captures bounded numeric history and the selected baseline on the server. It does not run SQL or trust a browser-supplied context object. The existing exact payload/destination review and explicit Send action still apply.
+
+**Diagnostics** is off by default. Enable only the evidence types you need. Blocking snapshots reuse normal collection; optional SQL reads have an independent interval of at least 120 seconds and share the global SQL budget. Deadlocks are read from existing SQL Server/Managed Instance `system_health` sessions: SQL Pulse never creates or alters Extended Events sessions. Azure SQL Database and unavailable/permission-restricted sessions are identified explicitly. Query Store must already be enabled; capture uses bounded execution-weighted closed windows and configured database limits. These are not exhaustive captures of every short-lived incident.
+
+SQL text, deadlock XML and execution plans are separate explicit retention choices. They can contain sensitive literals and business data; local history/evidence metadata are **not encrypted**. Evidence is not automatically included in AI or notifications. Keep the data directory protected and avoid syncing it to public repositories.
+
+Notification policies and destinations are under the notification settings' expanded **Notification policies, webhooks & delivery history** section. Windows use explicit UTC start/end times; acknowledgement suppresses an incident until its expiry, not collection or diagnosis. Optional escalation sends at most one additional approved generic notice for an unresolved reported incident after its configured duration; it is off by default and requires a fresh sample. Webhook-only operation can disable the email channel. Endpoint URLs/credentials are encrypted and not returned; previews identify their origin/fingerprint and freeze outbound templates. Changing destinations or enabling delivery requires fresh approval. No notifications are sent merely by opening a panel.
+
+### Repeatable capacity measurements
+
+Use the existing native runner for regression coverage, and the included synthetic benchmark for scheduler/cache/HTML workload measurements:
+
+```powershell
+npm test
+node .\Measure-Capacity.mjs --servers=100 --cycles=3 --latencyMs=2 --maxConcurrent=2
+node .\Measure-Capacity.mjs --servers=500 --cycles=3 --latencyMs=2 --maxConcurrent=1
+```
+
+The benchmark makes no SQL, authentication, SMTP or external AI calls. It reports CPU/RSS, elapsed/HTML-generation time, actual versus expected collection counts, pause handling, peak concurrency and duplicate-viewer deduplication. Timings depend on the host and simulated latency; they are **not production capacity certification or a live SQL-overhead benchmark**. For an authorized real estate, observe the Monitoring panel and SQL-side resource usage with representative targets before selecting budgets.
+
+### Windows service and scope
+
+Service mode is optional; see [installer/README.md](installer/README.md) for explicit elevated setup and account prerequisites. Use the same Windows identity/profile that owns the DPAPI-encrypted configuration. SQL Pulse does not silently migrate credentials to LocalSystem, install opaque downloaded wrappers, or bypass MFA/tenant policies. Unattended sign-in cannot open a browser; desktop authentication may need to be renewed.
+
+The application remains **localhost-only and single-user**. This release does not add remote access, shared logins, roles or multi-user administration.
 
 ## Quick install (Windows)
 
@@ -144,18 +185,18 @@ Primary and secondary action buttons use a shared compact style across the sideb
 
 The landing page shows every saved connection with compact resource/health cards and small trend lines beneath CPU, memory, sessions, active and blocked numbers. Compact overview and detailed-server headers, inline health totals and smaller filters leave more room for metrics; Counters and Save baseline appear only in detailed dashboards. The sidebar groups AI and email configuration under Settings, shows email monitoring status, and labels its Theme, About and Exit actions. Trends reuse up to 30 already-collected samples without extra SQL; unknown values and long gaps are not connected. They build up as samples arrive and reset when SQL Pulse restarts. Click a card or sidebar connection to open all details; **All servers** returns to the overview. Search and service/group filters do not change server configuration. Missing or unavailable measurements are shown as unknown, not zero or healthy.
 
-Collection uses at most **two SQL subprocesses at a time** across all views, instances, and counter tests. Per-instance single-flight requests prevent overlapping snapshots after credential changes. Browser polling pauses when hidden; without opted-in email monitoring, overview collection uses a finite viewing lease and stops when nobody is viewing it.
+Collection uses at most **two SQL subprocesses at a time** across all views, instances, optional diagnostics and counter tests; Monitoring & history can lower that ceiling to one. Per-instance single-flight requests prevent overlapping snapshots after credential changes. Browser polling pauses when hidden; without independent monitoring or approved notification polling, overview collection uses a finite viewing lease and stops when nobody is viewing it.
 
-In a server's detailed dashboard, **Pause server** persists the selected server's monitoring state and displays a **Paused** tag in its card, sidebar and detail heading. New SQL collection and email observation stop only for that server; work already running may finish. **Read cached sample** does not run SQL, and **Resume server** resumes only that connection. In-memory samples are retained until app restart; a paused server with no cached sample shows that explicitly. **Pause view** on All servers only stops this browser's automatic refresh and leaves saved server pause states and approved background email monitoring unchanged.
+In a server's detailed dashboard, **Pause server** persists the selected server's monitoring state and displays a **Paused** tag in its card, sidebar and detail heading. New SQL collection, optional diagnostic SQL and notification observation stop only for that server; work already running may finish. **Read cached sample** does not run SQL, and **Resume server** resumes only that connection. In-memory samples are retained until app restart; a paused server with no cached sample shows that explicitly. **Pause view** on All servers only stops this browser's automatic refresh and leaves saved server pause states and independent/approved background monitoring unchanged.
 
 | Data | Normal cadence |
 |---|---|
-| Core health, resources, waits, sessions, blocking and file I/O | Shared 30-second snapshot; background email cadence defaults to 60 seconds |
-| Database inventory, buffer-pool descriptor scan and missing indexes | 5 minutes per connection |
-| Query Store top queries | 2 minutes, weighted statistics over intervals covering the recent hour |
+| Core health, resources, waits, sessions, blocking and file I/O | Shared 30-second snapshot; background cadence defaults to 60 seconds |
+| Database inventory, optional buffer-pool descriptor scan and missing indexes | 5-minute default per connection; configurable in Monitoring & history |
+| Query Store top queries | 2-minute default, weighted statistics over intervals covering the recent hour; configurable cadence |
 | Custom counters | Independent 2-minute default, configurable from 1 minute to 1 hour |
 
-Manual refresh and additional tabs reuse fresh samples rather than forcing full SQL scans. Expensive data shows its independent sample timestamp. Ancillary failures preserve the previous result with explicit stale/error metadata; stale data is not scored as fresh. Cumulative waits are labelled historical signals, not proof of a current bottleneck. Managed Instance's platform-managed backups are not incorrectly flagged as missing local backups.
+Manual refresh and additional tabs reuse fresh samples rather than forcing full SQL scans. Core measurement timestamps are distinct from assembly completion after optional work. Expensive data shows its independent sample timestamp. Ancillary failures preserve the previous result with explicit stale/error metadata; stale data is not scored as fresh. Health uses ready interval waits/I/O when available; first/reset/unavailable intervals cannot prove current pressure or recovery. Cumulative waits remain labelled historical signals, not proof of a current bottleneck. Managed Instance's platform-managed backups are not incorrectly flagged as missing local backups.
 
 ## Custom counters
 

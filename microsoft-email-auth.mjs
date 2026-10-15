@@ -358,10 +358,14 @@ export function createMicrosoftEmailAuth({
     settings() {
       return serialize(async () => {
         ensureOpen();
-        const settings = await read(), saved = await credential(settings);
+        const settings = await read();
+        let saved, authenticationError;
+        try { saved = await credential(settings); }
+        catch (error) { authenticationError = safeError(error).message; }
         return {
           clientId: settings.clientId, tenant: settings.tenant, authenticated: !!saved,
           username: saved?.username || '', revision: settings.revision,
+          ...(authenticationError ? { authenticationError } : {}),
         };
       });
     },

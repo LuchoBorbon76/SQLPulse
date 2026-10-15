@@ -32,10 +32,17 @@ export function createAsyncLimiter(maxConcurrent = 2) {
       Promise.resolve().then(operation).then(resolve, reject).finally(() => { active--; drain(); });
     }
   }
-  return operation => new Promise((resolve, reject) => {
+  const limited = operation => new Promise((resolve, reject) => {
     queue.push({ operation, resolve, reject });
     drain();
   });
+  limited.stats = () => ({ active, queued: queue.length, maxConcurrent });
+  limited.configure = value => {
+    if (!Number.isInteger(value) || value < 1 || value > 2) throw new Error('Concurrency budget must be 1 or 2');
+    maxConcurrent = value;
+    drain();
+  };
+  return limited;
 }
 
 export function createSectionCache({ now = Date.now } = {}) {
@@ -142,5 +149,9 @@ export function createCollectorCache(collect, {
     latestRequests.set(id, request);
     return request.promise;
   }
-  return { get, peek, snapshot, invalidate };
+  return {
+    get, peek, snapshot, invalidate,
+    idle: () => Promise.allSettled([...tails.values()]),
+    stats: () => ({ ...limited.stats(), cached: entries.size, failed: failures.size, pending: latestRequests.size }),
+  };
 }

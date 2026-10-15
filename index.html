@@ -18,6 +18,10 @@
 <link rel="stylesheet" href="/fleet-ui.css">
 <link rel="stylesheet" href="/counters-ui.css">
 <link rel="stylesheet" href="/alerts-ui.css">
+<link rel="stylesheet" href="/operations-ui.css">
+<link rel="stylesheet" href="/history-ui.css">
+<link rel="stylesheet" href="/diagnostics-ui.css">
+<link rel="stylesheet" href="/alerts-operations-ui.css">
 <style>
 :root{color-scheme:light;--cp-bg:#f7f4ef;--cp-bg-elevated:#fcfbf8;--cp-surface:#ffffff;--cp-surface-soft:#f5f5f5;--cp-border:#dedede;--cp-border-strong:#919191;--cp-text:#242424;--cp-text-muted:#5c5c5c;--cp-text-soft:#6f6f6f;--cp-accent:#b11f4b;--cp-accent-hover:#9a1a41;--cp-accent-soft:rgba(177,31,75,0.08);--cp-accent-fg:#ffffff;--cp-success:#16a34a;--cp-danger:#dc2626;--cp-warning:#f59e0b;--cp-link:#0078d4;--cp-highlight:rgba(177,31,75,0.12);}
 html[data-theme="dark"]{color-scheme:dark;--cp-bg:#3d3b3a;--cp-bg-elevated:#343231;--cp-surface:#292929;--cp-surface-soft:#2e2e2e;--cp-border:#474747;--cp-border-strong:#5f5f5f;--cp-text:#dedede;--cp-text-muted:#919191;--cp-text-soft:#b0b0b0;--cp-accent:#fd8ea1;--cp-accent-hover:#fb7b91;--cp-accent-soft:rgba(253,142,161,0.14);--cp-accent-fg:#1a1a1a;--cp-success:#4ade80;--cp-danger:#f87171;--cp-warning:#fbbf24;--cp-link:#4da6ff;--cp-highlight:rgba(253,142,161,0.12);}
@@ -317,7 +321,7 @@ body > .qp-tt b, body > .qp-tt strong{font-weight:600 !important;color:#000 !imp
 tr.clickable{cursor:pointer;}
 tr.clickable:hover td:first-child{border-left:3px solid var(--cp-accent);padding-left:7px;}
 .card.disabled{opacity:0.55;position:relative;}
-.card.disabled::after{content:"Not available on Azure SQL Database";position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:var(--cp-surface-soft);border:1px dashed var(--cp-border-strong);color:var(--cp-text-muted);padding:8px 14px;border-radius:8px;font-size:12px;font-weight:600;letter-spacing:0.02em;pointer-events:none;}
+.card.disabled::after{content:attr(data-unavailable-label);position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:var(--cp-surface-soft);border:1px dashed var(--cp-border-strong);color:var(--cp-text-muted);padding:8px 14px;border-radius:8px;font-size:12px;font-weight:600;letter-spacing:0.02em;pointer-events:none;}
 .engine-badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;background:var(--cp-accent-soft);color:var(--cp-accent);margin-left:10px;vertical-align:middle;}
 /* Traffic-light health indicator */
 .semaphore{display:flex;align-items:center;gap:8px;padding:6px 12px 6px 8px;border-radius:24px;background:var(--cp-surface-soft);border:1px solid var(--cp-border);cursor:pointer;user-select:none;position:relative;}
@@ -382,6 +386,7 @@ tr.clickable:hover td:first-child{border-left:3px solid var(--cp-accent);padding
       <h3 id="sidebar-settings-title">Settings</h3>
       <button class="btn ghost configure-ai sidebar-setting" id="ai-btn" title="Configure an AI provider"><span class="setting-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="7" width="14" height="13" rx="3"/><path d="M12 3v4M2 12h3m14 0h3M9 16h6"/><circle cx="9" cy="11" r=".8" fill="currentColor"/><circle cx="15" cy="11" r=".8" fill="currentColor"/></svg></span><span class="setting-copy"><strong>Configure AI provider</strong><small>Model &amp; credentials</small></span><span class="setting-chevron" aria-hidden="true">›</span></button>
       <button type="button" class="btn ghost sidebar-setting" id="alert-settings-btn" title="Configure optional email alerts"><span class="setting-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="m3 7 9 6 9-6"/></svg></span><span class="setting-copy"><strong>Email alerts</strong><small>Recipients &amp; delivery</small></span><span class="setting-chevron" aria-hidden="true">›</span></button>
+      <button type="button" class="btn ghost sidebar-setting" id="monitor-settings-btn" title="Collection budgets, retention and collector self-health"><span class="setting-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 12h4l3-7 4 14 3-7h4"/><rect x="2" y="2" width="20" height="20" rx="3"/></svg></span><span class="setting-copy"><strong>Monitoring &amp; history</strong><small>Collection &amp; retention</small></span><span class="setting-chevron" aria-hidden="true">›</span></button>
       <div id="email-monitor-status" class="monitor-status" role="status" aria-live="polite" data-state="unknown">Email status not loaded</div>
     </section>
     <div class="sidebar-footer">
@@ -413,7 +418,7 @@ tr.clickable:hover td:first-child{border-left:3px solid var(--cp-accent);padding
           <span>Exit</span>
         </button>
       </div>
-      <div class="sig-line">Created by <span class="sig">Luis Fernando Borbon</span> · <span style="opacity:0.7;">© 2026 · v1.4.4</span></div>
+      <div class="sig-line">Created by <span class="sig">Luis Fernando Borbon</span> · <span style="opacity:0.7;">© 2026 · v1.5.0</span></div>
     </div>
   </aside>
 
@@ -440,6 +445,8 @@ tr.clickable:hover td:first-child{border-left:3px solid var(--cp-accent);padding
           <button class="btn ghost tb" id="pause-btn" title="Pause auto-refresh"><span class="ic">⏸</span><span>Pause</span></button>
           <button class="btn ghost tb" id="counters-btn" title="Manage custom counters"><span class="ic">🎯</span><span>Counters</span></button>
           <button class="btn ghost tb" id="snapshot-btn" title="Save this sample as a comparison baseline"><span class="ic">📸</span><span>Save baseline</span></button>
+          <button type="button" class="btn ghost tb" id="history-btn" title="Investigate persisted historical windows and comparisons" hidden>History</button>
+          <button type="button" class="btn ghost tb" id="diagnostics-btn" title="Optional local blocking, deadlock and query-regression evidence" hidden>Diagnostics</button>
         </div>
         <div class="controls-row2">
           <div></div>
@@ -1208,6 +1215,29 @@ const aiReady = import('/ai-ui.js').then(({ initAiUi }) => {
   optionalModuleError('AI', error, ['ai-btn']);
   document.querySelectorAll('[data-ai-scope]').forEach(button => { button.disabled = true; });
 });
+let operationsController, historyController, diagnosticsController;
+const operationsReady = import('/operations-ui.js').then(({ initOperationsUi }) => {
+  operationsController = initOperationsUi({ onChanged: () => refreshCurrentView() });
+  el('monitor-settings-btn').addEventListener('click', () => { void operationsController.open(); });
+}).catch(error => optionalModuleError('Monitoring', error, ['monitor-settings-btn']));
+const historyReady = import('/history-ui.js').then(({ initHistoryUi }) => {
+  historyController = initHistoryUi({
+    el, getActiveServerId: () => dashboardView === 'detail' ? activeServerId : null,
+    getServerName: id => servers.find(server => server.id === id)?.name || id,
+    onAskAi: async selection => {
+      await aiReady;
+      if (!aiController) throw new Error('AI interface is unavailable. Reload the dashboard.');
+      if (dashboardView !== 'detail' || activeServerId !== selection.serverId) throw new Error('Selected server changed. Reopen History for the intended server.');
+      historyController.close();
+      await aiController.askVisual({ serverId: selection.serverId, scope: 'history', from: selection.from, to: selection.to,
+        baseline: selection.baseline || 'day', title: 'Historical investigation' });
+    },
+  });
+}).catch(error => optionalModuleError('Historical investigation', error, ['history-btn']));
+const diagnosticsReady = import('/diagnostics-ui.js').then(({ initDiagnosticsUi }) => {
+  diagnosticsController = initDiagnosticsUi({ getServer: () => dashboardView === 'detail' ? servers.find(server => server.id === activeServerId) : null });
+  el('diagnostics-btn').addEventListener('click', () => { void diagnosticsController.open(); });
+}).catch(error => optionalModuleError('Incident evidence', error, ['diagnostics-btn']));
 document.addEventListener('click', async event => {
   const button = event.target.closest('[data-ai-scope]');
   if (!button || !el('detail-view').contains(button)) return;
@@ -1273,17 +1303,18 @@ const countersReady = import('/counters-ui.js').then(({ initCountersUi }) => {
 }).catch(error => {
   optionalModuleError('Custom counters', error, ['counters-btn']);
 });
-let alertSettingsController;
+let alertSettingsController, alertOperationsController;
 function updateEmailMonitorStatus(settings){
   if (!settings || typeof settings.enabled !== 'boolean') return;
   el('email-monitor-status').textContent = settings.enabled
-    ? `Email monitoring enabled${settings.intervalSeconds ? ' · '+settings.intervalSeconds+'s polling' : ''}`
-    : 'Email monitoring disabled';
+    ? `${settings.emailEnabled === false ? 'Webhook' : 'Notification'} monitoring enabled${settings.intervalSeconds ? ' · '+settings.intervalSeconds+'s polling' : ''}`
+    : 'Notifications disabled';
   el('email-monitor-status').dataset.state = settings.enabled ? 'enabled' : 'disabled';
 }
 const alertsReady = import('/alerts-ui.js').then(({ initAlertSettingsUi }) => {
   alertSettingsController = initAlertSettingsUi({
     el, esc, confirmDialog,
+    onClose: () => alertOperationsController?.deactivate?.(),
     onMonitoringChanged: settings => {
       updateEmailMonitorStatus(settings);
       if (dashboardStarted) void refreshCurrentView();
@@ -1295,6 +1326,22 @@ const alertsReady = import('/alerts-ui.js').then(({ initAlertSettingsUi }) => {
   el('email-monitor-status').textContent = 'Email alerts unavailable';
   el('email-monitor-status').dataset.state = 'error';
 });
+const alertOperationsReady = alertsReady.then(async () => {
+  if (!alertSettingsController) return;
+  const { initAlertOperationsUi } = await import('/alerts-operations-ui.js');
+  const root = document.createElement('section'); root.id = 'alert-operations-root';
+  el('email-options').append(root);
+  alertOperationsController = initAlertOperationsUi({
+    root,
+    confirmDialog: message => confirmDialog('Approve notification delivery', message, 'Approve', { destructive: false }),
+    onChanged: async settings => {
+      updateEmailMonitorStatus(settings);
+      if (dashboardStarted) void refreshCurrentView();
+      if (el('alert-settings-backdrop')?.classList.contains('show')) await alertSettingsController.refresh({ preserveDrafts: true });
+    },
+  });
+  for (const id of ['alert-settings-btn', 'alerts-email-settings']) el(id).addEventListener('click', () => { void alertOperationsController.refresh(); });
+}).catch(error => optionalModuleError('Notification policies', error, []));
 el('alerts-email-settings').addEventListener('click', () => {
   el('alerts-backdrop').classList.remove('show');
 }, { capture: true });
@@ -1858,6 +1905,10 @@ function updateDetailActions(DATA){
   el('counters-btn').hidden = dashboardView !== 'detail';
   el('snapshot-btn').hidden = dashboardView !== 'detail';
   el('snapshot-btn').disabled = !usable;
+  el('history-btn').hidden = dashboardView !== 'detail';
+  el('history-btn').disabled = !historyController || dashboardView !== 'detail' || !activeServerId;
+  el('diagnostics-btn').hidden = dashboardView !== 'detail';
+  el('diagnostics-btn').disabled = !diagnosticsController || dashboardView !== 'detail' || !activeServerId;
   document.querySelectorAll('#detail-view [data-ai-scope]').forEach(button => {
     const scope = button.dataset.aiScope;
     let available = !!aiController && usable && button.dataset.aiUnavailable !== 'true';
@@ -1913,12 +1964,23 @@ function setActiveServer(id){
   if (!st.historyLoaded && !st.historyRequest && !document.hidden) {
     const controller = new AbortController();
     st.historyRequest = controller;
-    fetch('/api/history?serverId='+encodeURIComponent(id)+'&limit=120', { signal:controller.signal }).then(r=>r.json()).then(h=>{
+    fetch('/api/history?serverId='+encodeURIComponent(id)+'&limit=120', { signal:controller.signal }).then(async r=>{
+      const h = await r.json();
+      if (!r.ok) throw new Error(h.error || 'History could not be loaded');
+      if (!Array.isArray(h)) throw new Error('Invalid history response');
+      return h;
+    }).then(h=>{
       if (controller.signal.aborted || serverState.get(id) !== st) return;
-      st.history = Array.isArray(h) ? h : [];
+      st.history = [...new Map([...h, ...(st.history || [])].map(point => [point.t, point])).values()]
+        .sort((a,b) => a.t - b.t).slice(-120);
+      st.historyError = null;
       st.historyLoaded = true;
       if (dashboardView === 'detail' && activeServerId === id && st.data) render(st.data, st.prevData);
-    }).catch(()=>{}).finally(()=>{ if (st.historyRequest === controller) st.historyRequest = null; });
+    }).catch(error=>{
+      if (error.name === 'AbortError' || controller.signal.aborted || serverState.get(id) !== st) return;
+      st.historyError = error.message;
+      if (dashboardView === 'detail' && activeServerId === id) el('timeline').textContent = `History unavailable: ${error.message}. Reopen this server to retry.`;
+    }).finally(()=>{ if (st.historyRequest === controller) st.historyRequest = null; });
   }
   if (st.data) {
     render(st.data, st.prevData);
@@ -1979,13 +2041,14 @@ function fetchMetrics(){
     st.lastError = null;
     // Extend local history buffer (mirrors what the server appended to disk)
     st.history = st.history || [];
-    const bhr = data.instance?.buffer_cache_hit_ratio_base > 0 ? (data.instance.buffer_cache_hit_ratio*100/data.instance.buffer_cache_hit_ratio_base) : 100;
+    const bhr = data.instance?.buffer_cache_hit_ratio_base > 0 && Number.isFinite(data.instance.buffer_cache_hit_ratio)
+      ? (data.instance.buffer_cache_hit_ratio*100/data.instance.buffer_cache_hit_ratio_base) : null;
     const customVals = {};
-    (data.custom_counters||[]).forEach(cc=>{ if(typeof cc.value==='number') customVals[cc.id] = cc.value; });
+    (data.custom_counters||[]).forEach(cc=>{ if(cc.enabled !== false && !cc.stale && !cc.error && Number.isFinite(cc.value)) customVals[cc.id] = cc.value; });
     if (!st.history.some(sample => sample.t === st.lastFetchAt)) st.history.push({
       t: st.lastFetchAt,
       ple: data.instance?.page_life_expectancy ?? null,
-      bhr: Number(bhr.toFixed(2)),
+      bhr: bhr == null ? null : Number(bhr.toFixed(2)),
       memMb: data.instance?.memory_in_use_mb ?? null,
       sessions: data.instance?.user_sessions ?? null,
       active: data.instance?.active_requests ?? null,
@@ -2018,6 +2081,8 @@ function fetchMetrics(){
       setStatus('err','Error');
       el('err').textContent = `Fetch failed: ${e.message}`;
       el('err').classList.add('show');
+      if (st.data) render(st.data, st.prevData);
+      else renderHealth(null);
       updateDetailActions(null);
     }
     renderServerList();
@@ -2040,6 +2105,7 @@ function counterCls(cc) {
   return '';
 }
 function renderTimeline(hist, DATA) {
+  hist = (Array.isArray(hist) ? hist : []).filter(point => Number.isFinite(point.t)).slice().sort((a,b) => a.t - b.t);
   if (!Array.isArray(hist) || hist.length < 2) {
     el('timeline').innerHTML = '<div class="empty">Collecting samples… (charts appear after 2+ refresh cycles)</div>';
     return;
@@ -2058,10 +2124,13 @@ function renderTimeline(hist, DATA) {
   const w = 900, h = 180, padL = 45, padR = 20, padT = 15, padB = 30;
   const innerW = w - padL - padR, innerH = h - padT - padB;
   const n = hist.length;
-  const stepX = n > 1 ? innerW / (n - 1) : innerW;
+  const startTime = hist[0].t, timeRange = Math.max(1, hist[n-1].t - startTime);
+  const xAt = index => padL + (hist[index].t - startTime) / timeRange * innerW;
+  const gaps = hist.slice(1).map((point,index) => point.t - hist[index].t).filter(ms => ms > 0);
+  const gapThreshold = Math.max(90000, gaps.length ? Math.min(...gaps) * 3 : 90000);
 
   const paths = seriesDefs.map(s => {
-    const vals = hist.map(x => (typeof x[s.key] === 'number') ? x[s.key] : null);
+    const vals = hist.map(x => (typeof x[s.key] === 'number' && Number.isFinite(x[s.key])) ? x[s.key] : null);
     const validVals = vals.filter(v => v != null);
     if (validVals.length < 2) return { ...s, d: '', min:0, max:0 };
     const min = Math.min(...validVals);
@@ -2069,8 +2138,10 @@ function renderTimeline(hist, DATA) {
     const range = max - min || 1;
     let d = ''; let started = false;
     vals.forEach((v, i) => {
-      if (v == null) return;
-      const x = padL + i * stepX;
+      if (v == null || !Number.isFinite(v)) { started = false; return; }
+      if (hist[i].reset || hist[i].counterReset) started = false;
+      if (i > 0 && hist[i].t - hist[i-1].t > gapThreshold) started = false;
+      const x = xAt(i);
       const y = padT + innerH - ((v - min) / range) * innerH;
       d += (started ? ' L' : 'M') + x.toFixed(1) + ',' + y.toFixed(1);
       started = true;
@@ -2100,7 +2171,7 @@ function renderTimeline(hist, DATA) {
   }).join('');
 
   const xAxisLabels = tickIdx.map((i, k) => {
-    const x = padL + i * stepX;
+    const x = xAt(i);
     return `<text x="${x}" y="${h - 8}" text-anchor="middle" font-size="10" fill="var(--cp-text-muted)">${xLabels[k]}</text>`;
   }).join('');
 
@@ -2127,7 +2198,7 @@ function renderCustomCounterCards(DATA, hist) {
     const sampleNote = `${cc.sampledAt ? 'Sampled '+fmtDate(cc.sampledAt) : ''}${cc.intervalSeconds ? ' · every '+cc.intervalSeconds+'s' : ''}${cc.cached && usable ? ' · cached' : ''}`;
     // Build spark from history.custom[cc.id]
     const values = hist.map(s => (s.custom && typeof s.custom[cc.id] === 'number') ? s.custom[cc.id] : null);
-    const spark = renderSparklineFromValues(values);
+    const spark = renderSparklineFromValues(values, hist.map(point => point.t));
     return `<div class="kpi ${cls}">
       <div class="badge ${cls}">${cc.enabled === false ? 'PAUSED' : cc.stale ? 'STALE' : 'CUSTOM'}</div>
       <div class="label">${esc(cc.name)}</div>
@@ -2142,9 +2213,9 @@ function renderCustomCounterCards(DATA, hist) {
 function renderSparkline(hist, field) {
   if (!Array.isArray(hist) || hist.length < 2) return '';
   const values = hist.map(s => (typeof s[field] === 'number') ? s[field] : null);
-  return renderSparklineFromValues(values);
+  return renderSparklineFromValues(values, hist.map(point => point.t));
 }
-function renderSparklineFromValues(values) {
+function renderSparklineFromValues(values, times) {
   const nums = values.filter(v => typeof v === 'number' && Number.isFinite(v));
   if (nums.length < 2) return '';
   const min = Math.min(...nums);
@@ -2152,11 +2223,16 @@ function renderSparklineFromValues(values) {
   const range = max - min || 1;
   const w = 60, h = 20;
   const step = values.length > 1 ? w / (values.length - 1) : w;
+  const timed = times?.length === values.length && times.every(Number.isFinite) && times[times.length-1] > times[0];
+  const timeRange = timed ? times[times.length-1] - times[0] : 1;
+  const gaps = timed ? times.slice(1).map((time,index) => time - times[index]).filter(ms => ms > 0) : [];
+  const gapThreshold = Math.max(90000, gaps.length ? Math.min(...gaps)*3 : 90000);
   let d = '';
   let started = false;
   values.forEach((v, i) => {
-    if (typeof v !== 'number' || !Number.isFinite(v)) return;
-    const x = i * step;
+    if (typeof v !== 'number' || !Number.isFinite(v)) { started = false; return; }
+    if (timed && i > 0 && times[i] - times[i-1] > gapThreshold) started = false;
+    const x = timed ? (times[i]-times[0])/timeRange*w : i * step;
     const y = h - ((v - min) / range) * h;
     d += (started ? ' L' : 'M') + x.toFixed(1) + ',' + y.toFixed(1);
     started = true;
@@ -2207,7 +2283,10 @@ el('semaphore').addEventListener('keydown', event => {
 function render(DATA, PREV){
   if (dashboardView !== 'detail' || (DATA.server_id && DATA.server_id !== activeServerId)) return;
   try {
-    renderHealth(DATA);
+    const unavailable = serverState.get(activeServerId)?.lastError;
+    el('detail-view').classList.toggle('stale-data', Boolean(unavailable));
+    renderHealth(unavailable ? null : DATA);
+    if (unavailable) el('health-label').textContent = 'Unavailable';
     const i = DATA.instance || {};
     const p = PREV ? PREV.instance : null;
     const cur = servers.find(s=>s.id===activeServerId);
@@ -2224,8 +2303,12 @@ function render(DATA, PREV){
     if (cur?.monitoringPaused) el('current-server-sub').textContent += ' · monitoring paused · last collected sample';
 
     // Toggle "unsupported" gray-out based on engine
-    el('buffer-card').classList.toggle('disabled', DATA.buffer_pool === null);
-    el('tempdb-card').classList.toggle('disabled', DATA.tempdb === null);
+    for (const [cardId,section] of [['buffer-card','buffer_pool'],['tempdb-card','tempdb']]) {
+      const card = el(cardId), metadata = DATA.sectionMetadata?.[section];
+      card.classList.toggle('disabled', DATA[section] === null);
+      card.dataset.unavailableLabel = metadata?.disabled ? 'Disabled in Monitoring & history'
+        : isAzureDb ? 'Not available on Azure SQL Database' : 'Collection unavailable for this sample';
+    }
 
     let kpis;
     if (isAzure) {
@@ -2249,7 +2332,10 @@ function render(DATA, PREV){
         {label:"Sessions / Connections", value:`${i.user_sessions||0} / ${i.connections||0}`, hint:`${i.active_requests||0} active, ${i.blocked_requests||0} blocked`, cls:"", d:delta(i.user_sessions, p?.user_sessions), spark:'sessions'},
         {label:"Active Requests", value:i.active_requests||0, hint:`${i.blocked_requests||0} blocked`, cls:(i.blocked_requests||0)>0?"crit":"", d:delta(i.active_requests, p?.active_requests), spark:'active'},
         {label:"Memory In Use", value:((i.memory_in_use_mb||0)/1024).toFixed(2)+" GB", hint:`Target ${((i.target_memory_mb||0)/1024).toFixed(1)} GB / Host ${((i.physical_memory_mb||0)/1024).toFixed(1)} GB`, d:delta(i.memory_in_use_mb, p?.memory_in_use_mb), spark:'memMb'},
-        {label:"Batch Requests (cum)", value:fmtInt(i.batch_requests_per_sec_cum||0), hint:`Compilations: ${fmtInt(i.compilations_cum||0)}`, cls:"", d:delta(i.batch_requests_per_sec_cum, p?.batch_requests_per_sec_cum)},
+        DATA.intervals ? {label:"Batch Requests / sec", value:DATA.intervals.rates?.batch_requests_per_sec?.toFixed(1) ?? '—',
+          hint:`Compilations / sec: ${DATA.intervals.rates?.compilations_per_sec?.toFixed(1) ?? '—'} · ${DATA.intervals.rates?.status === 'ready' ? Number(DATA.intervals.elapsedSeconds).toFixed(1)+'s interval' : DATA.intervals.rates?.reason || 'Waiting for baseline'}`,
+          available:Number.isFinite(DATA.intervals.rates?.batch_requests_per_sec)}
+          : {label:"Batch Requests (cum)", value:fmtInt(i.batch_requests_per_sec_cum||0), hint:`Compilations: ${fmtInt(i.compilations_cum||0)}`, cls:"", d:delta(i.batch_requests_per_sec_cum, p?.batch_requests_per_sec_cum)},
         {label:"CPU Cores", value:i.cpu_count||'?', hint:"Logical schedulers"},
         {label:"Uptime", value:i.uptime_min!=null?(i.uptime_min/60).toFixed(1)+"h":'?', hint:`Started ${fmtDate(i.sqlserver_start_time)}`},
       ];
@@ -2265,7 +2351,7 @@ function render(DATA, PREV){
     };
     kpis.forEach(kpi => {
       const field = fields[kpi.label];
-      kpi.available = !field || (typeof i[field] === 'number' && Number.isFinite(i[field]) && (field !== 'buffer_cache_hit_ratio_base' || (i[field] > 0 && typeof i.buffer_cache_hit_ratio === 'number' && Number.isFinite(i.buffer_cache_hit_ratio))));
+      kpi.available ??= !field || (typeof i[field] === 'number' && Number.isFinite(i[field]) && (field !== 'buffer_cache_hit_ratio_base' || (i[field] > 0 && typeof i.buffer_cache_hit_ratio === 'number' && Number.isFinite(i.buffer_cache_hit_ratio))));
       if (kpi.label === 'Sessions / Connections') {
         kpi.value = `${fmtInt(i.user_sessions)} / ${fmtInt(i.connections)}`;
         kpi.hint = `${fmtInt(i.active_requests)} active, ${fmtInt(i.blocked_requests)} blocked`;
@@ -2301,9 +2387,11 @@ function render(DATA, PREV){
     renderTimeline(hist, DATA);
 
     // Narrative — sourced from computeHealth() so it always matches the semaphore
-    const h = computeHealth(DATA);
+    const h = computeHealth(unavailable ? null : DATA);
     if (h.level === 'unknown' || h.level === 'unavailable') {
-      el('narrative').textContent = 'Instance metrics are unavailable. No health assessment can be made from this sample.';
+      el('narrative').textContent = unavailable
+        ? `Current health is unavailable. Displaying the last collected sample from ${fmtDate(DATA.generated_at)}; it is not a current health assessment.`
+        : 'Instance metrics are unavailable. No health assessment can be made from this sample.';
     } else if (h.level === 'healthy') {
       el('narrative').innerHTML = '<b>Health summary:</b> No pressing issues detected. Instance looks healthy.';
     } else {
@@ -2314,7 +2402,15 @@ function render(DATA, PREV){
     }
 
     // Waits
-    const waits = DATA.waits||[];
+    const waitInterval = DATA.intervals?.waits;
+    const waits = waitInterval?.status === 'ready' ? waitInterval.rows : DATA.waits||[];
+    let waitNote = el('waits').previousElementSibling;
+    if (!waitNote?.classList.contains('interval-note')) {
+      waitNote = document.createElement('p'); waitNote.className = 'section-sample-note interval-note'; el('waits').before(waitNote);
+    }
+    waitNote.textContent = waitInterval?.status === 'ready'
+      ? `Current interval: ${Number(DATA.intervals.elapsedSeconds).toFixed(1)} seconds. Not lifetime totals.`
+      : `Historical cumulative totals${waitInterval ? `; current interval unavailable (${waitInterval.reason || 'waiting for baseline'})` : ''}. Not proof of a current bottleneck.`;
     const maxWait = Math.max(1, ...waits.map(w=>Number(w.wait_time_s)||0));
     el('waits').innerHTML = waits.map(w=>{
       const wt_s = Number(w.wait_time_s)||0;
@@ -2382,14 +2478,19 @@ function render(DATA, PREV){
 
     const heatWarn = isAzure || DATA.engine === 'azure-mi' ? 30 : 10;
     const heatCrit = isAzure || DATA.engine === 'azure-mi' ? 100 : 20;
-    el('fileio-sub').textContent = `Per-file cumulative read/write stalls (since stats reset) — green <${heatWarn}ms, amber ${heatWarn}-${heatCrit}ms, red >${heatCrit}ms`;
+    const ioInterval = DATA.intervals?.file_io;
+    el('fileio-sub').textContent = `${ioInterval ? `Per-file interval latency (${Number(DATA.intervals.elapsedSeconds || 0).toFixed(1)}s; ${ioInterval.status}${ioInterval.reason ? ' / '+ioInterval.reason : ''})` : 'Per-file cumulative read/write stalls (since stats reset)'} — green <${heatWarn}ms, amber ${heatWarn}-${heatCrit}ms, red >${heatCrit}ms`;
     const heat = (ms)=>{
       if(ms==null) return "";
       if(ms<heatWarn) return "background:rgba(22,163,74,0.15);color:var(--cp-success);";
       if(ms<heatCrit) return "background:rgba(245,158,11,0.18);color:var(--cp-warning);";
       return "background:rgba(220,38,38,0.18);color:var(--cp-danger);";
     };
-    el('file-io').innerHTML = (DATA.file_io||[]).map(f=>`
+    const files = ioInterval ? (ioInterval.rows || []).slice().sort((a,b) =>
+      Math.max(b.avg_read_latency_ms ?? -1,b.avg_write_latency_ms ?? -1) - Math.max(a.avg_read_latency_ms ?? -1,a.avg_write_latency_ms ?? -1))
+      .slice(0,15).map(row => ({ ...(DATA.file_io || []).find(file => file.database_id === row.database_id && file.file_id === row.file_id), ...row }))
+      : DATA.file_io || [];
+    el('file-io').innerHTML = files.map(f=>`
       <tr>
         <td style="max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(f.db_name)}">${esc(f.db_name)}</td>
         <td class="mono" style="max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(f.logical_name)}">${esc(f.logical_name)}</td>
@@ -2950,7 +3051,7 @@ setInterval(()=>{
 
 // Initial load
 (async function init(){
-  await Promise.all([sqlEndpointReady, healthReady, fleetReady, aiReady, countersReady, alertsReady]);
+  await Promise.all([sqlEndpointReady, healthReady, fleetReady, aiReady, countersReady, alertsReady, alertOperationsReady, operationsReady, historyReady, diagnosticsReady]);
   setStatus('paused','Review the usage disclaimer');
   await (await disclaimerReady).ensureAcknowledged();
   await loadServers();

@@ -6,12 +6,26 @@ ai-settings.json
 alert-settings.json
 alert-state.json
 microsoft-email-auth.json
+monitor-settings.json
+monitor-heartbeat.json
+incident-settings.json
+incident-evidence.json
+history-settings.json
+.sql-pulse-tools.json
+.sql-pulse-service.json
+.sql-pulse-owner.json
+SqlPulse.Service.exe
+.install-stage-*/
+.install-rollback-*/
 .*.tmp
 
 # Runtime
 node_modules/
 tmp/
 history/
+history-series/
+incidents/
+diagnostics/
 ai-copilot-home/
 dist/
 .reliability-*/
@@ -19,7 +33,11 @@ tests/.api-test-*/
 tests/.ai-test-*/
 tests/.alerts-test-*/
 tests/.package-test-*/
+tests/.alert-operations-*/
+tests/.microsoft-email-auth-*/
+.sql-connection-*/
 *.log
+*.log.*
 *.err
 
 # Generated SQL

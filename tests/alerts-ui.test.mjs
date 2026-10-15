@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { initAlertSettingsUi } from '../alerts-ui.js';
 
-async function withUi(run, { testFailure = false, unlock = true, initiallyEnabled = false, deferTest, disableFailure = false } = {}) {
+async function withUi(run, { testFailure = false, unlock = true, initiallyEnabled = false, deferTest, disableFailure = false, emailEnabled = true, webhookTemplates = [], onClose, onClosed } = {}) {
   const previous = globalThis.document, nodes = new Map(), requests = [];
   const make = id => {
     const classes = new Set();
@@ -14,7 +14,8 @@ async function withUi(run, { testFailure = false, unlock = true, initiallyEnable
       replaceChildren() {}, focus() {}, scrollIntoView() {}, remove() {},
       setAttribute(name, value) { this[name] = value; },
       querySelector: () => modal, querySelectorAll: () => [...nodes.values()],
-      set innerHTML(html) { for (const match of html.matchAll(/\bid="([^"]+)"/g)) if (!nodes.has(match[1])) make(match[1]); },
+      get innerHTML() { return this._html || ''; },
+      set innerHTML(html) { this._html = html; for (const match of html.matchAll(/\bid="([^"]+)"/g)) if (!nodes.has(match[1])) make(match[1]); },
     };
     nodes.set(id, node);
     return node;
@@ -23,12 +24,12 @@ async function withUi(run, { testFailure = false, unlock = true, initiallyEnable
   make('alert-settings-backdrop'); make('alert-settings-btn');
   globalThis.document = { activeElement: null, addEventListener() {}, removeEventListener() {} };
   const settings = {
-    enabled: initiallyEnabled, recipients: [], sender: '', intervalSeconds: 60, cooldownSeconds: 120,
+    enabled: initiallyEnabled, emailEnabled, recipients: [], sender: '', intervalSeconds: 60, cooldownSeconds: 120,
     levels: { warning: false, critical: true }, sendRecovery: true, includeServerName: false,
     smtp: { host: 'smtp.example.test', port: 587, tlsMode: 'starttls', username: '', hasPassword: true, hasUsername: true },
   };
   const ui = initAlertSettingsUi({
-    el: id => nodes.get(id), confirmDialog: async () => true, fetchImpl: async (url, options) => {
+    el: id => nodes.get(id), onClose, onClosed, confirmDialog: async () => true, fetchImpl: async (url, options) => {
       requests.push({ url, body: options.body && JSON.parse(options.body) });
       if (url.endsWith('/settings') && options.body) {
         if (disableFailure) return { ok: false, status: 500, json: async () => ({ error: 'Settings save failed' }) };
@@ -41,7 +42,7 @@ async function withUi(run, { testFailure = false, unlock = true, initiallyEnable
           time: '2026-10-14T23:30:00Z', message: testFailure ? 'Gmail rejected SMTP authentication. Use a Google app password.' : 'SMTP accepted the test.' }) };
       }
       return { ok: true, json: async () => url.endsWith('settings-preview') || url.endsWith('test-preview') ? {
-        previewId: 'synthetic-preview', sender: '', recipients: [], smtp: settings.smtp, templates: [],
+        previewId: 'synthetic-preview', sender: '', recipients: [], smtp: settings.smtp, templates: [], emailEnabled, webhookTemplates,
       } : settings };
     },
   });
@@ -52,11 +53,70 @@ async function withUi(run, { testFailure = false, unlock = true, initiallyEnable
       nodes.get('email-enabled').checked = true;
       nodes.get('email-enabled').handlers.change(); await settle();
     }
-    await run({ ui, nodes, requests });
+    await run({ ui, nodes, requests, settings });
   }
   finally { ui.destroy(); globalThis.document = previous; }
 }
 const settle = () => new Promise(resolve => setImmediate(resolve));
+
+test('onClosed runs after clearing credentials and invalidating approval', async () => {
+  let calls = 0, inspect = () => {};
+  await withUi(async ({ nodes, ui }) => {
+    nodes.get('email-password').value = 'PRIVATE-draft';
+    await nodes.get('email-test').handlers.click();
+    inspect = () => {
+      assert.equal(nodes.get('email-password').value, '');
+      assert.equal(nodes.get('email-user').value, '');
+      assert.equal(nodes.get('email-preview').hidden, true);
+      assert.equal(nodes.get('alert-settings-backdrop').classList.contains('show'), false);
+    };
+    ui.close();
+    assert.equal(calls, 1);
+  }, { onClosed: () => { calls++; inspect(); } });
+});
+
+test('refresh synchronizes approved notification state while preserving drafts unless explicitly discarded', async () => {
+  await withUi(async ({ nodes, ui, requests, settings }) => {
+    nodes.get('email-recipients').value = 'draft@example.test';
+    nodes.get('email-password').value = 'PRIVATE-draft';
+    nodes.get('email-show-password').checked = true;
+    nodes.get('email-show-password').handlers.change();
+    settings.enabled = true; settings.emailEnabled = false; settings.recipients = ['stored@example.test'];
+    await ui.refresh();
+    assert.equal(nodes.get('email-enabled').checked, true);
+    assert.equal(nodes.get('email-recipients').value, 'draft@example.test');
+    assert.equal(nodes.get('email-password').value, 'PRIVATE-draft');
+    assert.equal(nodes.get('email-password').type, 'password');
+    assert.equal(nodes.get('email-show-password').checked, false);
+    assert.equal(nodes.get('alert-settings-backdrop').classList.contains('show'), true);
+    await nodes.get('email-test').handlers.click();
+    assert.equal(requests.find(request => request.url.endsWith('/test-preview')).body.emailEnabled, false);
+    await ui.refresh({ preserveDrafts: false });
+    assert.equal(nodes.get('email-recipients').value, 'stored@example.test');
+    assert.equal(nodes.get('email-password').value, '');
+    assert.equal(nodes.get('email-preview').hidden, true);
+  }, { unlock: false });
+});
+
+test('webhook-only settings keep notification wording and review the exact webhook payload', async () => {
+  let closed = 0;
+  await withUi(async ({ nodes, requests, ui }) => {
+    assert.match(nodes.get('alert-settings-backdrop').innerHTML, />Notifications<\/h2>/);
+    assert.match(nodes.get('email-status').textContent, /Notifications enabled/);
+    await nodes.get('email-test').handlers.click();
+    assert.equal(requests.find(request => request.url.endsWith('/test-preview')).body.emailEnabled, false);
+    assert.match(nodes.get('email-preview-destination').textContent, /Email channel disabled/);
+    assert.match(nodes.get('email-preview-templates').innerHTML, /example\.test/);
+    assert.match(nodes.get('email-preview-templates').innerHTML, /Reviewed generic notification/);
+    assert.match(nodes.get('email-approve').textContent, /notification test/);
+    ui.close();
+    assert.equal(closed, 1);
+  }, {
+    initiallyEnabled: true, emailEnabled: false,
+    onClose: () => { closed++; },
+    webhookTemplates: [{ destination: 'https://example.test/…', payload: { text: 'Reviewed generic notification' } }],
+  });
+});
 
 test('delivery tests preserve typed password while running and after both failure and success', async () => {
   for (const testFailure of [true, false]) {
@@ -108,7 +168,7 @@ test('email off greys and disables every setting/action while leaving the main s
     assert.equal(nodes.get('email-options').classList.contains('email-options-disabled'), false);
     assert.equal(nodes.get('email-password').disabled, false);
     assert.equal(nodes.get('email-test').disabled, false);
-    assert.match(nodes.get('email-status').textContent, /Background email remains disabled.*approve/);
+    assert.match(nodes.get('email-status').textContent, /Background notifications remain disabled.*approve/);
   }, { unlock: false });
 });
 

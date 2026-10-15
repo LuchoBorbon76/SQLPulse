@@ -128,10 +128,41 @@ test('cancel failures are visible and leave the pending operation active', async
     createId: () => id, pollMs: 1000, onProgress: update => updates.push(update),
     fetchImpl: async url => url === '/api/servers' ? main.promise : response({ error: 'Cleanup unavailable' }, 500),
   });
+
   const pending = client.request('/api/servers', { body: {} });
   await assert.rejects(client.cancel(), /Cleanup unavailable/);
   assert.equal(client.isRunning, true);
   assert.match(updates.at(-1).message, /Cancellation was not confirmed/);
   main.resolve(response({ error: 'Connection failed' }, 400));
   await assert.rejects(pending, /Connection failed/);
+});
+
+test('a lost save response reconciles commit progress and blocks a blind duplicate Add', async () => {
+    const main = deferred(); let saves = 0, ids = 0;
+    const client = createConnectionRequest({
+      createId: () => `11111111-1111-4111-8111-${String(++ids).padStart(12, '0')}`, pollMs: 1,
+      fetchImpl: async url => {
+        if (url === '/api/servers') { saves++; return main.promise; }
+        return response({ state: 'running', phase: 'saving', cancellable: false });
+      },
+    });
+    const pending = client.request('/api/servers', { body: {} });
+    await new Promise(resolve => setTimeout(resolve, 5));
+    main.reject(new TypeError('Failed to fetch'));
+    await assert.rejects(pending, /save result is uncertain/);
+    assert.equal(client.reconciliationRequired, true);
+    await assert.rejects(client.request('/api/servers', { body: {} }), /previous save result is uncertain/);
+    assert.equal(saves, 1);
+});
+
+test('a lost response with confirmed failed server operation allows a safe retry', async () => {
+    const client = createConnectionRequest({
+      createId: () => id, pollMs: 1000,
+      fetchImpl: async url => {
+        if (url === '/api/servers') throw new TypeError('Network interrupted');
+        return response({ state: 'failed', phase: 'failed' });
+      },
+    });
+    await assert.rejects(client.request('/api/servers', { body: {} }), /Network interrupted/);
+    assert.equal(client.reconciliationRequired, false);
 });

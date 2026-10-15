@@ -1,8 +1,9 @@
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
-import { dirname, join } from 'node:path';
+import { dirname, join, win32, posix } from 'node:path';
 import { mkdir } from 'node:fs/promises';
 import { createJsonStore } from './storage.mjs';
+import { resolveToolPath } from './tool-paths.mjs';
 
 const execute = promisify(execFile);
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
@@ -107,13 +108,14 @@ function checkConfig(id, c) {
 function validateSettings(s) {
   if (!s || s.schemaVersion !== 1 || !Number.isSafeInteger(s.revision) || s.revision < 0 || !IDS.has(s.providerId)
     || !s.configs || Object.keys(s.configs).length !== IDS.size
-    || Object.keys(s).some(k => !['schemaVersion', 'revision', 'providerId', 'configs'].includes(k))) fail('Invalid AI settings file. Restore or repair it before continuing.');
+    || Object.keys(s).some(k => !['schemaVersion', 'revision', 'providerId', 'configs', 'githubAuthSource'].includes(k))
+    || (s.githubAuthSource !== undefined && !['automatic', 'cli'].includes(s.githubAuthSource))) fail('Invalid AI settings file. Restore or repair it before continuing.');
   for (const id of IDS) checkConfig(id, s.configs[id]);
   return true;
 }
 function defaults(ollamaUrl) {
   return {
-    schemaVersion: 1, revision: 0, providerId: 'ollama',
+    schemaVersion: 1, revision: 0, providerId: 'ollama', githubAuthSource: 'automatic',
     configs: Object.fromEntries([...IDS].map(id => [id, {
       baseUrl: normalizeAiEndpoint(id, id === 'ollama' ? ollamaUrl || BASES[id] : BASES[id]),
       model: '', deployment: '', authMode: 'entra', reasoningEnabled: false, reasoningEffort: '',
@@ -132,6 +134,7 @@ async function deadline(promise, ms, message, cancel = () => {}) {
 export function createAiProviders({
   settingsFile, encryptSecret, decryptSecret, ollamaUrl, env = process.env,
   fetchImpl = globalThis.fetch, execFileImpl = execute, spawnImpl = spawn,
+  resolveToolPathImpl = resolveToolPath,
   loadCopilotSdk = () => import('@github/copilot-sdk'), storeFactory = createJsonStore,
   timeoutMs = 180000, discoveryTimeoutMs = 20000, loginTimeoutMs = 180000,
   loginPollMs = 1500, cleanupTimeoutMs = 5000, platform = process.platform, logger = console,
@@ -150,11 +153,22 @@ export function createAiProviders({
     },
   };
   const modelCache = new Map();
+  const verifiedTools = new Map();
+  function toolPath(name) {
+    if (verifiedTools.has(name)) return verifiedTools.get(name);
+    let executable;
+    try { executable = resolveToolPathImpl(name, { env }); } catch {}
+    if (typeof executable !== 'string' || !(win32.isAbsolute(executable) || posix.isAbsolute(executable))
+      || /["%\r\n]/.test(executable) || (/\.cmd$/i.test(executable) && executable.includes('!'))) {
+      fail(`A verified ${name === 'gh' ? 'GitHub' : 'Azure'} CLI executable was not found. Repair the CLI installation and retry.`);
+    }
+    verifiedTools.set(name, executable);
+    return executable;
+  }
   let runtime = null, runtimeToken = null, runtimeHealthy = false, runtimeQueue = Promise.resolve(), closed = false;
   let login = { state: 'idle' }, loginAttempt = null;
-  let ignoreGitHubEnvironment = false;
   const cleanEnv = () => Object.fromEntries(Object.entries(env).filter(([k]) => !KEYS.github.includes(k.toUpperCase())));
-  const envSecret = id => (id === 'github' && ignoreGitHubEnvironment ? '' : KEYS[id].map(k => env[k]).find(Boolean) || '');
+  const envSecret = id => KEYS[id].map(k => env[k]).find(Boolean) || '';
   function cleanupFailure(scope, error) {
     const detail = identifiableError(error, 'Cleanup failed. No provider or subprocess output was recorded.').message;
     const message = `${scope}: ${detail}`;
@@ -180,10 +194,11 @@ export function createAiProviders({
     const s = await store.read();
     return {
       schemaVersion: s.schemaVersion, revision: s.revision, providerId: s.providerId,
+      githubAuthSource: s.githubAuthSource || 'automatic',
       providers: AI_PROVIDERS,
       configs: Object.fromEntries([...IDS].map(id => {
         const { secretEnc, ...config } = s.configs[id];
-        return [id, { ...config, hasSecret: Boolean(secretEnc), hasEnvironmentSecret: Boolean(envSecret(id)) }];
+        return [id, { ...config, hasSecret: Boolean(secretEnc), hasEnvironmentSecret: Boolean(envSecret(id)) && !(id === 'github' && s.githubAuthSource === 'cli') }];
       })),
     };
   }
@@ -224,10 +239,12 @@ export function createAiProviders({
         }
       }
       checkConfig(id, c);
-      changed = s.providerId !== id || JSON.stringify(c) !== JSON.stringify(s.configs[id]);
+      const githubAuthSource = id === 'github' && typeof patch.secret === 'string' && patch.secret.trim()
+        ? 'automatic' : s.githubAuthSource || 'automatic';
+      changed = s.providerId !== id || JSON.stringify(c) !== JSON.stringify(s.configs[id]) || githubAuthSource !== (s.githubAuthSource || 'automatic');
       credentialChanged = s.configs[id].secretEnc !== c.secretEnc;
       if (!changed) return s;
-      return { ...s, providerId: id, revision: s.revision + 1, configs: { ...s.configs, [id]: c } };
+      return { ...s, providerId: id, githubAuthSource, revision: s.revision + 1, configs: { ...s.configs, [id]: c } };
     });
     if (changed) modelCache.delete(id);
     if (id === 'github' && credentialChanged) await stopRuntime();
@@ -246,8 +263,9 @@ export function createAiProviders({
     };
   }
   async function cliToken() {
+    const executable = toolPath('gh');
     try {
-      const { stdout } = await execFileImpl('gh', ['auth', 'token', '--hostname', 'github.com'], {
+      const { stdout } = await execFileImpl(executable, ['auth', 'token', '--hostname', 'github.com'], {
         env: cleanEnv(), timeout: 10000, windowsHide: true, maxBuffer: 32768,
       });
       return text(stdout.trim(), 'GitHub credential', 16384, false);
@@ -255,7 +273,8 @@ export function createAiProviders({
   }
   async function getRuntime(config, tokenOverride) {
     if (closed) fail('AI provider service is closed.');
-    const token = tokenOverride ?? (await secret('github', config) || await cliToken());
+    const source = (await store.read()).githubAuthSource || 'automatic';
+    const token = tokenOverride ?? (source === 'cli' ? await cliToken() : await secret('github', config) || await cliToken());
     if (!token) fail('GitHub is not signed in. Sign in with GitHub CLI or provide a Copilot-enabled token.');
     return runtimeLock(async () => {
       if (closed) fail('AI provider service is closed.');
@@ -323,12 +342,13 @@ export function createAiProviders({
     if (id === 'azure-openai' && config.authMode === 'entra') {
       try {
         const args = ['account', 'get-access-token', '--resource', 'https://cognitiveservices.azure.com', '--output', 'json'];
-        const executable = platform === 'win32' ? 'cmd.exe' : 'az';
-        // Windows installs Azure CLI as az.cmd. This command is entirely fixed;
-        // endpoint, deployment, model, and other user input never reach the shell.
-        const commandArgs = platform === 'win32' ? ['/d', '/s', '/c', 'az.cmd account get-access-token --resource https://cognitiveservices.azure.com --output json'] : args;
+        const cli = toolPath('az');
+        const batch = platform === 'win32' && /\.cmd$/i.test(cli);
+        const executable = batch ? env.ComSpec || 'cmd.exe' : cli;
+        // Only a verified, shell-safe absolute CLI path and fixed words reach cmd.exe.
+        const commandArgs = batch ? ['/d', '/s', '/c', `""${cli}" ${args.join(' ')}"`] : args;
         const { stdout } = await execFileImpl(executable, commandArgs, {
-          env, timeout: discoveryTimeoutMs, windowsHide: true, maxBuffer: 65536,
+          env, timeout: discoveryTimeoutMs, windowsHide: true, windowsVerbatimArguments: batch, maxBuffer: 65536,
         });
         const data = JSON.parse(stdout);
         if (!data.accessToken || typeof data.accessToken !== 'string' || /[\r\n]/.test(data.accessToken)) fail('No token.');
@@ -515,7 +535,7 @@ export function createAiProviders({
         await deadline(attempt.exitPromise, cleanupTimeoutMs, 'GitHub CLI sign-in cleanup timed out.');
       } catch (e) { throw cleanupFailure('GitHub sign-in process cleanup failed', e); }
     }
-    const finish = (error = null) => {
+    const finish = (error = null, commit = async () => {}) => {
       if (!active()) return Promise.resolve();
       if (attempt.finishing) return attempt.finishPromise;
       attempt.finishing = true; clearTimers();
@@ -524,6 +544,10 @@ export function createAiProviders({
         try { await cleanupChild(); } catch (e) { cleanupError = e; }
         if (!active()) return;
         if (closed && !error) error = safeError('GitHub sign-in cancelled.');
+        if (!error && !cleanupError) {
+          try { await commit(); }
+          catch (failure) { error = identifiableError(failure, 'GitHub sign-in could not be saved. The prior authentication preference was retained.'); }
+        }
         attempt.done = true; attempt.output = '';
         if (attempt.capture) {
           attempt.child?.stdout?.removeListener('data', attempt.capture);
@@ -562,13 +586,10 @@ export function createAiProviders({
         const c = (await selected('github')).config;
         await getRuntime(c, token);
         if (!active() || attempt.finishing) return;
-        ignoreGitHubEnvironment = true;
-        await store.update(s => {
+        await finish(null, () => store.update(s => {
           const gh = { ...s.configs.github }; delete gh.secretEnc;
-          return { ...s, revision: s.revision + 1, configs: { ...s.configs, github: gh } };
-        });
-        if (!active() || attempt.finishing) return;
-        await finish();
+          return { ...s, githubAuthSource: 'cli', revision: s.revision + 1, configs: { ...s.configs, github: gh } };
+        }));
       } catch (e) {
         await finish(identifiableError(e, 'GitHub signed in but Copilot access could not be verified.'));
       } finally {
@@ -581,16 +602,8 @@ export function createAiProviders({
     try {
       // An existing token is not evidence that this new device flow completed.
       attempt.baseline = await cliToken();
-      if (switchAccount) {
-        ignoreGitHubEnvironment = true;
-        await store.update(s => {
-          const c = { ...s.configs.github }; delete c.secretEnc;
-          return { ...s, revision: s.revision + 1, configs: { ...s.configs, github: c } };
-        });
-        await stopRuntime();
-      }
       if (closed) { await finish(safeError('GitHub sign-in cancelled.')); return loginStatus(); }
-      const child = spawnImpl('gh', ['auth', 'login', '--hostname', 'github.com', '--web', '--clipboard', '--git-protocol', 'https', '--skip-ssh-key'], {
+      const child = spawnImpl(toolPath('gh'), ['auth', 'login', '--hostname', 'github.com', '--web', '--clipboard', '--git-protocol', 'https', '--skip-ssh-key'], {
         env: { ...cleanEnv(), GH_PROMPT_DISABLED: '1' }, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
       });
       attempt.child = child;

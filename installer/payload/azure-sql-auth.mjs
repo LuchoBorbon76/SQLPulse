@@ -3,18 +3,20 @@ import { normalizeTenant, redactSqlDiagnostic } from './sqlcmd-options.mjs';
 import { extractMicrosoftBrowserPrompt, extractMicrosoftDevicePrompt } from './microsoft-device-signin.js';
 import { cliBrowserCommand } from './cli-browser.mjs';
 import { connectionAbortError, throwIfConnectionAborted } from './connection-progress.mjs';
+import { resolveToolPath } from './tool-paths.mjs';
 
 const SQL_RESOURCE = 'https://database.windows.net/';
 const normalizeUser = value => typeof value === 'string' ? value.trim().toLowerCase() : '';
 const sessionError = message => Object.assign(new Error(message), { code: 'AZ_SESSION' });
 const identityError = message => Object.assign(new Error(message), { code: 'AZ_IDENTITY' });
 
-export function azureCliCommand(args, platform = process.platform) {
+export function azureCliCommand(args, platform = process.platform, cliPath) {
   // Only fixed CLI words and validated tenant domains/GUIDs reach cmd.exe.
   if (args.some(value => !/^[a-z0-9:/._-]+$/i.test(value))) throw new Error('Unsafe Azure CLI argument');
+  if (cliPath !== undefined && (typeof cliPath !== 'string' || !cliPath || /["%\r\n&|<>^!]/.test(cliPath))) throw new Error('Unsafe Azure CLI executable path');
   return platform === 'win32'
-    ? { executable: 'cmd.exe', args: ['/d', '/s', '/c', `az.cmd ${args.join(' ')}`] }
-    : { executable: 'az', args };
+    ? { executable: 'cmd.exe', args: ['/d', '/s', '/c', cliPath ? `""${cliPath}" ${args.join(' ')}"` : `az.cmd ${args.join(' ')}`] }
+    : { executable: cliPath || 'az', args };
 }
 
 export function readSqlToken(payload, now = Date.now()) {
@@ -44,9 +46,12 @@ export function sqlTokenMatchesUser(claims, hint, account) {
     normalizeUser(account.tenantId) === normalizeUser(claims.tid);
 }
 
-export function createAzureSqlAuth({ execFileImpl = execFile, platform = process.platform, env = process.env, now = Date.now, promptTimeoutMs = 60000 } = {}) {
+export function createAzureSqlAuth({ execFileImpl = execFile, platform = process.platform, env = process.env, now = Date.now, promptTimeoutMs = 60000,
+  resolveCli = execFileImpl === execFile && platform === 'win32' ? () => resolveToolPath('az', { env }) : () => undefined,
+} = {}) {
   let queue = Promise.resolve();
   let cleanupBlocked = false;
+  let cliResolved = false, verifiedCliPath;
   const cliEnv = { ...env };
   for (const key of Object.keys(cliEnv)) {
     if (/^AZURE_CORE_(?:ENABLE_BROKER_ON_WINDOWS|LOGIN_EXPERIENCE_V2)$/i.test(key)) delete cliEnv[key];
@@ -85,7 +90,13 @@ export function createAzureSqlAuth({ execFileImpl = execFile, platform = process
   function execute(args, { login = false, entraFlow = 'browser', signal, onProgress = () => {} } = {}) {
     throwIfConnectionAborted(signal);
     if (cleanupBlocked) return Promise.reject(new Error('Azure CLI cleanup failed. Close the previous sign-in process before restarting SQL Pulse.'));
-    const command = azureCliCommand(args, platform);
+    if (!cliResolved) {
+      verifiedCliPath = resolveCli();
+      cliResolved = verifiedCliPath !== null;
+    }
+    const cliPath = verifiedCliPath;
+    if (cliPath === null) throw new Error('A verified Azure CLI installation was not found. Repair prerequisites with the SQL Pulse installer.');
+    const command = azureCliCommand(args, platform, cliPath);
     const deviceFlow = entraFlow === 'device-code';
     const loginLabel = deviceFlow ? 'device sign-in' : 'browser sign-in';
     return new Promise((resolve, reject) => {
@@ -158,7 +169,8 @@ export function createAzureSqlAuth({ execFileImpl = execFile, platform = process
       const stderrChunk = chunk => publish('stderr', chunk);
       child = execFileImpl(command.executable, command.args, {
         env: login && !deviceFlow ? { ...cliEnv, BROWSER: cliBrowserCommand() } : cliEnv,
-        timeout: login ? 240000 : 15000, windowsHide: true, encoding: 'utf8', maxBuffer: 1024 * 1024,
+        timeout: login ? 240000 : 15000, windowsHide: true, windowsVerbatimArguments: platform === 'win32',
+        encoding: 'utf8', maxBuffer: 1024 * 1024,
       }, (error, stdout, stderr) => {
         // Mocks can invoke callbacks synchronously without returning a ChildProcess.
         Promise.resolve().then(() => finish(error, stdout, stderr)).catch(reject);

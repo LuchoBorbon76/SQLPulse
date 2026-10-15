@@ -30,13 +30,16 @@ export function computeHealth(DATA, { now = Date.now } = {}) {
   }
   if (Number(i.blocked_requests) > 0) add('blocking', 'critical', `${i.blocked_requests} blocked session(s)`);
 
-  const waits = rows(DATA.waits);
+  const waitInterval = DATA.intervals?.waits;
+  const waits = waitInterval ? (waitInterval.status === 'ready' ? rows(waitInterval.rows) : []) : rows(DATA.waits);
   const totalWaitS = waits.reduce((s, w) => s + (Number(w.wait_time_s) || 0), 0);
   const totalSignalS = waits.reduce((s, w) => s + (Number(w.signal_wait_s) || 0), 0);
   if (totalWaitS > 0) {
-    // DMV waits are cumulative, not evidence that a bottleneck is happening now.
     const signalPct = totalSignalS / totalWaitS * 100;
-    if (signalPct >= 20) add('historical-signal-waits', 'warning', `Historical signal waits ${signalPct.toFixed(1)}% (cumulative; review CPU trend)`);
+    const period = waitInterval ? `last ${Number(DATA.intervals.elapsedSeconds).toFixed(0)}s` : 'cumulative; review CPU trend';
+    const prefix = waitInterval ? 'Interval' : 'Historical';
+    const issuePrefix = waitInterval ? 'interval' : 'historical';
+    if (signalPct >= 20) add(`${issuePrefix}-signal-waits`, 'warning', `${prefix} signal waits ${signalPct.toFixed(1)}% (${period})`);
     const catPct = patterns => waits.filter(w => patterns.some(p => String(w.wait_type || '').includes(p)))
       .reduce((s, w) => s + (Number(w.wait_time_s) || 0), 0) / totalWaitS * 100;
     for (const [key, patterns, threshold, label] of [
@@ -48,7 +51,7 @@ export function computeHealth(DATA, { now = Date.now } = {}) {
       ['network', ['ASYNC_NETWORK_IO'], 20, 'ASYNC_NETWORK_IO'],
     ]) {
       const pct = catPct(patterns);
-      if (pct >= threshold) add(`historical-${key}-waits`, 'warning', `Historical ${label} waits ${pct.toFixed(0)}% (cumulative; inspect current activity)`);
+      if (pct >= threshold) add(`${issuePrefix}-${key}-waits`, 'warning', `${prefix} ${label} waits ${pct.toFixed(0)}% (${waitInterval ? period : 'cumulative; inspect current activity'})`);
     }
   }
 
@@ -86,7 +89,9 @@ export function computeHealth(DATA, { now = Date.now } = {}) {
 
   const dataWarn = isAzureAny ? 30 : 10, dataCrit = isAzureAny ? 100 : 20;
   const logWarn = isAzureAny ? 20 : 5, logCrit = isAzureAny ? 50 : 20;
-  const io = rows(DATA.file_io), dataFiles = io.filter(f => f.file_type === 'ROWS'), logFiles = io.filter(f => f.file_type === 'LOG');
+  const fileInterval = DATA.intervals?.file_io;
+  const io = fileInterval ? rows(fileInterval.rows).filter(file => file.status === 'ready') : rows(DATA.file_io);
+  const dataFiles = io.filter(f => f.file_type === 'ROWS'), logFiles = io.filter(f => f.file_type === 'LOG');
   const badData = dataFiles.filter(f => Number(f.avg_read_latency_ms) > dataCrit || Number(f.avg_write_latency_ms) > dataCrit);
   const midData = dataFiles.filter(f => !badData.includes(f) && (Number(f.avg_read_latency_ms) > dataWarn || Number(f.avg_write_latency_ms) > dataWarn));
   const badLog = logFiles.filter(f => Number(f.avg_write_latency_ms) > logCrit);

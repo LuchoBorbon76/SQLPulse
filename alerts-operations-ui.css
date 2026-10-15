@@ -1,0 +1,15 @@
+.alert-operations { padding: 1rem; color: inherit; }
+.alert-operations summary { cursor: pointer; font-weight: 600; }
+.alert-operations label { display: block; margin: .5rem 0; }
+.alert-operations input:not([type="checkbox"]), .alert-operations select { display: block; width: 100%; max-width: 32rem; box-sizing: border-box; padding: .45rem; }
+.alert-operations fieldset { margin: 1rem 0; border: 1px solid #728096; border-radius: .4rem; padding: .8rem; }
+.alert-policy-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: .7rem; }
+.alert-operation-row, .alert-operation-destination { padding: .7rem; margin: .6rem 0; border: 1px solid #728096; border-radius: .3rem; overflow-wrap: anywhere; }
+.alert-operation-actions { display: flex; flex-wrap: wrap; gap: .6rem; }
+.alert-operations button { cursor: pointer; padding: .5rem .8rem; margin: .25rem; }
+.alert-operations button:disabled { cursor: wait; opacity: .6; }
+.alert-operations pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 28rem; overflow: auto; padding: .8rem; border: 1px solid #728096; }
+.alert-operations table { width: 100%; border-collapse: collapse; margin-top: .6rem; }
+.alert-operations th, .alert-operations td { text-align: left; vertical-align: top; padding: .5rem; border-bottom: 1px solid #728096; overflow-wrap: anywhere; }
+.alert-operations [data-history] { overflow: auto; }
+.alert-operations :focus-visible { outline: 2px solid #399cff; outline-offset: 2px; }

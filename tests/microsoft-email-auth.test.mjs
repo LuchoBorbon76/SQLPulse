@@ -423,7 +423,10 @@ test('corrupt JSON and encrypted cache are not exposed or overwritten', async t 
   await writeFile(settingsFile, JSON.stringify({
     schemaVersion: 1, clientId: CLIENT_ID, tenant: 'consumers', revision: 5, credentialEnc: 'PRIVATE-corrupt-ciphertext',
   }));
-  await assert.rejects(service.settings(), isSafeAuthError);
+  const status = await service.settings();
+  assert.equal(status.authenticated, false);
+  assert.match(status.authenticationError, /cache cannot be read/);
+  assert.ok(!JSON.stringify(status).includes('PRIVATE'));
   await assert.rejects(service.getAuthorization({ expectedRevision: 5, username: USERNAME, host: 'smtp-mail.outlook.com' }), isSafeAuthError);
   assert.ok((await readFile(settingsFile, 'utf8')).includes('PRIVATE-corrupt-ciphertext'));
 });

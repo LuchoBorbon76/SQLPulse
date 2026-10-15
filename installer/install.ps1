@@ -56,121 +56,8 @@ function Write-OK($msg)   { Write-Host "  [OK] $msg" -ForegroundColor Green }
 function Write-Warn($msg) { Write-Host "  [!!] $msg" -ForegroundColor Yellow }
 function Write-Err($msg)  { Write-Host "  [X] $msg"  -ForegroundColor Red }
 
-function Update-ToolPath([string[]]$First = @()) {
-    $entries = @($First) + @(
-        [Environment]::GetEnvironmentVariable('PATH', 'Machine'),
-        [Environment]::GetEnvironmentVariable('PATH', 'User'),
-        $env:PATH
-    )
-    $seen = @{}
-    $env:PATH = (@(foreach ($entry in ($entries -join ';').Split(';')) {
-        $entry = [Environment]::ExpandEnvironmentVariables($entry.Trim().Trim('"'))
-        if ($entry -and -not $seen.ContainsKey($entry.TrimEnd('\'))) {
-            $seen[$entry.TrimEnd('\')] = $true
-            $entry
-        }
-    }) -join ';')
-}
-
-function Invoke-InstallerNative([string]$Path, [string[]]$Arguments) {
-    $previousPreference = $ErrorActionPreference
-    try {
-        # Windows PowerShell 5.1 wraps native stderr as ErrorRecord even on success.
-        $ErrorActionPreference = 'Continue'
-        $output = & $Path @Arguments 2>&1
-        $code = $LASTEXITCODE
-        [pscustomobject]@{ ExitCode = $code; Output = ($output | Out-String).Trim() }
-    } catch {
-        [pscustomobject]@{ ExitCode = -1; Output = $_.Exception.Message }
-    } finally {
-        $ErrorActionPreference = $previousPreference
-    }
-}
-
-function Test-NodeVersion([string]$Text) {
-    if ($Text -notmatch '^v?(\d+\.\d+\.\d+)$') { return $false }
-    $version = [version]$Matches[1]
-    return (($version.Major -eq 20 -and $version -ge [version]'20.19.0') -or
-        $version -ge [version]'22.12.0')
-}
-
-function Get-ToolCandidates([string]$Name) {
-    $commands = @(switch ($Name) {
-        'node'   { @('node.exe') }
-        'sqlcmd' { @('sqlcmd.exe') }
-        'gh'     { @('gh.exe') }
-        'az'     { @('az.cmd', 'az.exe') }
-    })
-    $candidates = @(foreach ($command in $commands) {
-        Get-Command $command -All -CommandType Application -ErrorAction SilentlyContinue |
-            Select-Object -ExpandProperty Source
-    })
-    foreach ($base in @($env:ProgramFiles, ${env:ProgramFiles(x86)}, "$env:LOCALAPPDATA\Programs")) {
-        if (-not $base) { continue }
-        $relative = switch ($Name) {
-            'node'   { 'nodejs\node.exe' }
-            'sqlcmd' { 'SqlCmd\sqlcmd.exe' }
-            'gh'     { 'GitHub CLI\gh.exe' }
-            'az'     { 'Microsoft SDKs\Azure\CLI2\wbin\az.cmd'; 'Azure CLI\wbin\az.cmd' }
-        }
-        foreach ($path in $relative) { $candidates += Join-Path $base $path }
-    }
-    $executable = $commands[0]
-    $candidates += "$env:LOCALAPPDATA\Microsoft\WinGet\Links\$executable"
-    $packageId = switch ($Name) {
-        'node' { 'OpenJS.NodeJS.LTS' }; 'sqlcmd' { 'Microsoft.Sqlcmd' }
-        'gh' { 'GitHub.cli' }; 'az' { 'Microsoft.AzureCLI' }
-    }
-    $packages = "$env:LOCALAPPDATA\Microsoft\WinGet\Packages"
-    if (Test-Path -LiteralPath $packages) {
-        foreach ($folder in @(Get-ChildItem -LiteralPath $packages -Directory -Filter "$($packageId)_*" -ErrorAction SilentlyContinue)) {
-            $candidates += @(Get-ChildItem -LiteralPath $folder.FullName -Filter $executable -File -Recurse -ErrorAction SilentlyContinue |
-                Select-Object -ExpandProperty FullName)
-        }
-    }
-    $candidates | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) } | Select-Object -Unique
-}
-
-function Find-UsableTool([string]$Name) {
-    foreach ($candidate in @(Get-ToolCandidates $Name)) {
-        $probe = Invoke-InstallerNative $candidate @('--version')
-        if ($probe.ExitCode -ne 0) { continue }
-        $version = $null
-        switch ($Name) {
-            'node' {
-                if (Test-NodeVersion $probe.Output) {
-                    $npm = Join-Path (Split-Path $candidate) 'npm.cmd'
-                    if (Test-Path -LiteralPath $npm -PathType Leaf) {
-                        $previousPath = $env:PATH
-                        try {
-                            Update-ToolPath @((Split-Path $candidate))
-                            $npmVersion = Invoke-InstallerNative $npm @('--version')
-                            if ($npmVersion.ExitCode -eq 0 -and $npmVersion.Output -match '^\d+\.\d+\.\d+$') {
-                                $version = $probe.Output.TrimStart('v')
-                            }
-                        } finally {
-                            $env:PATH = $previousPath
-                        }
-                    }
-                }
-            }
-            'sqlcmd' {
-                # ODBC sqlcmd rejects --version; require the Go tool's version signature.
-                if ($probe.Output -match '(?im)^\s*(?:(?:sqlcmd|Version):\s*)?v(\d+\.\d+\.\d+)(?:\+[^\s]+)?\s*$') {
-                    if ([version]$Matches[1] -ge [version]'1.10.0') { $version = $Matches[1] }
-                }
-            }
-            'gh' {
-                if ($probe.Output -match '(?im)^gh version (\d+\.\d+\.\d+)') { $version = $Matches[1] }
-            }
-            'az' {
-                if ($probe.Output -match '(?im)^azure-cli\s+(\d+\.\d+\.\d+)') { $version = $Matches[1] }
-            }
-        }
-        if ($version) { return [pscustomobject]@{ Path = $candidate; Version = $version } }
-    }
-    return $null
-}
+. (Join-Path $payload 'ToolPaths.ps1')
+. (Join-Path $payload 'Dashboard-Lifecycle.ps1')
 
 function Install-WithWinget([string]$Id, [string]$FriendlyName) {
     Update-ToolPath
@@ -212,59 +99,10 @@ function Ensure-InstallerTool([string]$Name, [string]$Id, [string]$FriendlyName)
     return $tool
 }
 
-function Get-InstalledDashboardState([string]$Directory) {
-    $entryPoint = Join-Path ([IO.Path]::GetFullPath($Directory)) 'server.mjs'
-    $pattern = '(?i)(?:^|\s)"?' + [regex]::Escape($entryPoint) + '"?(?=\s|$)'
-    $processes = @(Get-CimInstance Win32_Process -ErrorAction Stop)
-    $running = @($processes | Where-Object { $_.Name -eq 'node.exe' -and $_.CommandLine -match $pattern })
-    $listeners = @(Get-NetTCPConnection -ErrorAction Stop |
-        Where-Object { $_.LocalPort -eq 8765 -and $_.State -eq 'Listen' })
-    foreach ($ownerId in @($listeners.OwningProcess | Select-Object -Unique)) {
-        if ($ownerId -notin @($running.ProcessId)) {
-            throw 'Port 8765 is used by another application. Nothing was stopped or overwritten.'
-        }
-    }
-    $ids = @($running.ProcessId)
-    $children = @()
-    do {
-        $next = @($processes | Where-Object { $_.ParentProcessId -in $ids -and $_.ProcessId -notin $ids })
-        $children += @($next | Where-Object { $_.Name -ne 'conhost.exe' })
-        $ids += @($next.ProcessId)
-    } while ($next.Count -gt 0)
-    return [pscustomobject]@{ Running = $running; Children = $children }
-}
-
-function Assert-InstallIdle([string]$Directory) {
-    $state = Get-InstalledDashboardState $Directory
-    if ($state.Children.Count -gt 0) {
-        throw 'SQL Pulse has active SQL/authentication or other child processes. Finish/cancel operations, stop SQL Pulse, then rerun the installer. Nothing was stopped or overwritten.'
-    }
-    if ($state.Running.Count -gt 0) {
-        throw ("SQL Pulse is still running from $Directory. Closing its browser tab does not stop monitoring. " +
-            "Finish/cancel operations, run the installed Stop-Dashboard.ps1, then rerun. Nothing was stopped or overwritten.")
-    }
-}
-
-function Stop-InstalledDashboard([string]$Directory) {
-    $state = Get-InstalledDashboardState $Directory
-    if ($state.Children.Count -gt 0) {
-        throw 'SQL Pulse has active SQL/authentication or other child processes. Finish/cancel them before stopping. Nothing was stopped.'
-    }
-    foreach ($process in $state.Running) {
-        # Re-read identity immediately before stopping to avoid acting on a reused PID.
-        $current = Get-CimInstance Win32_Process -Filter "ProcessId = $($process.ProcessId)" -ErrorAction Stop
-        if (-not $current) { continue }
-        if ($current.CreationDate -ne $process.CreationDate -or $current.CommandLine -ne $process.CommandLine) {
-            throw 'Dashboard process identity changed. Nothing else was stopped.'
-        }
-        Stop-Process -Id $process.ProcessId -ErrorAction Stop
-    }
-    Write-Host 'SQL Pulse stopped (or was not running).'
-}
-
 function Get-InstallerRuntimeNames {
     @('servers.json', 'ai-settings.json', 'alert-settings.json', 'alert-state.json',
-        'microsoft-email-auth.json', '.encryption-key', 'history', 'config-backups')
+        'microsoft-email-auth.json', '.encryption-key', 'history', 'history-series', 'monitor-settings.json', 'incident-evidence.json', 'config-backups',
+        '.sql-pulse-tools.json', '.sql-pulse-owner.json', '.sql-pulse-service.json', 'SqlPulse.Service.exe')
 }
 
 function Assert-SafePayload([string]$Directory) {
@@ -274,7 +112,8 @@ function Assert-SafePayload([string]$Directory) {
             throw "Unsafe installer payload contains runtime data/dependencies: $($item.Name). No installed settings were overwritten."
         }
     }
-    foreach ($name in @('server.mjs', 'package.json', 'package-lock.json', 'Start-Dashboard.ps1', 'Start-Dashboard.vbs', 'sql-dashboard-app.ico')) {
+    foreach ($name in @('server.mjs', 'package.json', 'package-lock.json', 'Start-Dashboard.ps1', 'Start-Dashboard.vbs', 'sql-dashboard-app.ico',
+        'ToolPaths.ps1', 'Dashboard-Lifecycle.ps1', 'tool-paths.mjs', 'Service-Helpers.ps1', 'Install-Service.ps1', 'Uninstall-Service.ps1', 'SqlPulse.Service.cs')) {
         if (-not (Test-Path -LiteralPath (Join-Path $Directory $name) -PathType Leaf)) { throw "Missing payload asset: $name. Extract the entire ZIP first." }
     }
 }
@@ -297,6 +136,7 @@ Write-Host ""
 
 # Validate before installing system prerequisites or touching an existing app.
 $InstallDir = [IO.Path]::GetFullPath($InstallDir)
+$script:SqlPulseToolDirectory = $InstallDir
 $payloadPath = [IO.Path]::GetFullPath($payload).TrimEnd('\')
 $targetPath = $InstallDir.TrimEnd('\')
 if ($targetPath -eq $payloadPath -or
@@ -306,15 +146,22 @@ if ($targetPath -eq $payloadPath -or
 }
 Assert-SafePayload $payload
 Assert-InstallIdle $InstallDir
+$ownerFile = Join-Path $InstallDir '.sql-pulse-owner.json'
+$ownerSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+if (Test-Path -LiteralPath $ownerFile -PathType Leaf) {
+    $owner = Get-Content -LiteralPath $ownerFile -Raw | ConvertFrom-Json
+    if ($owner.OwnerSid -ne $ownerSid) { throw 'This installation belongs to another Windows user. Encrypted configuration cannot be migrated by reinstalling.' }
+}
+$tools = @{}
 
 # 1) Prerequisites
 if (-not $SkipPrereqs) {
     Write-Step "Checking prerequisites..."
     $node = Ensure-InstallerTool 'node' 'OpenJS.NodeJS.LTS' 'Node.js LTS (20.19.x or >=22.12)'
-    $null = Ensure-InstallerTool 'sqlcmd' 'Microsoft.Sqlcmd' 'Go sqlcmd 1.10+'
+    $tools.sqlcmd = Ensure-InstallerTool 'sqlcmd' 'Microsoft.Sqlcmd' 'Go sqlcmd 1.10+'
     if (-not $Minimal) {
-        $null = Ensure-InstallerTool 'gh' 'GitHub.cli' 'GitHub CLI'
-        $null = Ensure-InstallerTool 'az' 'Microsoft.AzureCLI' 'Azure CLI'
+        $tools.gh = Ensure-InstallerTool 'gh' 'GitHub.cli' 'GitHub CLI'
+        $tools.az = Ensure-InstallerTool 'az' 'Microsoft.AzureCLI' 'Azure CLI'
     } else {
         Write-Warn 'Minimal installation: GitHub Copilot browser login (gh) and existing Azure CLI SQL session authentication (az) need those CLIs installed separately.'
     }
@@ -324,6 +171,7 @@ if (-not $SkipPrereqs) {
     $node = Find-UsableTool 'node'
 }
 if (-not $node) { throw 'Supported Node.js (20.19.x or >=22.12) with npm.cmd is required, including with -SkipPrereqs.' }
+$tools.node = $node
 Update-ToolPath @((Split-Path $node.Path))
 $npmPath = Join-Path (Split-Path $node.Path) 'npm.cmd'
 $npmProbe = Invoke-InstallerNative $npmPath @('--version')
@@ -355,13 +203,15 @@ try {
     }
     Assert-InstallIdle $InstallDir
     Backup-InstallerRuntime $InstallDir
-    foreach ($item in @(Get-ChildItem -LiteralPath $stage -Force)) {
-        if ($item.Name -eq 'node_modules') { continue }
-        Copy-Item -LiteralPath $item.FullName -Destination $InstallDir -Recurse -Force
-    }
-    $modules = Join-Path $InstallDir 'node_modules'
-    if (Test-Path -LiteralPath $modules) { Remove-Item -LiteralPath $modules -Recurse -Force }
-    Move-Item -LiteralPath (Join-Path $stage 'node_modules') -Destination $modules
+    Set-SqlPulseToolManifest $stage $tools
+    @{ OwnerSid = $ownerSid } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $stage '.sql-pulse-owner.json') -Encoding UTF8
+    $stopper = @'
+$ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'Dashboard-Lifecycle.ps1')
+Stop-InstalledDashboard $PSScriptRoot
+'@
+    Set-Content -LiteralPath (Join-Path $stage 'Stop-Dashboard.ps1') -Value $stopper -Encoding UTF8
+    Install-StagedDashboard $stage $InstallDir
     Write-OK 'Application files and verified locked dependencies installed; runtime settings preserved'
 } finally {
     if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
@@ -372,19 +222,6 @@ foreach ($file in @('Start-Dashboard.ps1', 'Start-Dashboard.vbs', 'sql-dashboard
     if (-not (Test-Path (Join-Path $InstallDir $file))) { throw "Missing launcher asset: $file" }
 }
 Write-OK "Hidden launcher and high-DPI icon installed"
-
-# Use the same process identity/active-child guards for the installed stop command.
-$stopper = @"
-`$ErrorActionPreference = 'Stop'
-function Get-InstalledDashboardState {
-$((Get-Command Get-InstalledDashboardState).Definition)
-}
-function Stop-InstalledDashboard {
-$((Get-Command Stop-InstalledDashboard).Definition)
-}
-Stop-InstalledDashboard `$PSScriptRoot
-"@
-Set-Content -Path (Join-Path $InstallDir 'Stop-Dashboard.ps1') -Value $stopper -Encoding UTF8
 
 # 5) Friendly hostname alias in %WINDIR%\System32\drivers\etc\hosts (needs admin)
 if (-not $NoHostsEntry) {

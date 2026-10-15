@@ -7,13 +7,13 @@ const common = [
   },
   {
     id: 'long-requests', name: 'Requests running over 30 seconds', unit: 'requests',
-    sql: 'SELECT COUNT_BIG(*) FROM sys.dm_exec_requests WHERE total_elapsed_time > 30000 AND session_id <> @@SPID;',
+    sql: 'SELECT COUNT_BIG(*) FROM sys.dm_exec_requests r JOIN sys.dm_exec_sessions s ON s.session_id = r.session_id WHERE s.is_user_process = 1 AND r.total_elapsed_time > 30000 AND r.session_id <> @@SPID;',
     description: 'Currently executing requests, not historical query statistics.',
     warnGt: 1, critGt: 5,
   },
   {
     id: 'active-requests', name: 'Active requests', unit: 'requests',
-    sql: 'SELECT COUNT_BIG(*) FROM sys.dm_exec_requests WHERE session_id <> @@SPID;',
+    sql: 'SELECT COUNT_BIG(*) FROM sys.dm_exec_requests r JOIN sys.dm_exec_sessions s ON s.session_id = r.session_id WHERE s.is_user_process = 1 AND r.session_id <> @@SPID;',
     description: 'Small live DMV count. Choose thresholds appropriate for this workload.',
   },
   {

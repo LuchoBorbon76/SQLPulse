@@ -16,7 +16,13 @@ $payloadNames = @(
     'counters.mjs', 'counters-ui.js', 'counters-ui.css', 'counter-templates.js',
     'azure-sql-auth.mjs', 'cli-browser.mjs', 'connection-progress.mjs',
     'connection-request.js', 'copy-signin-code.js', 'microsoft-device-signin.js',
-    'sql-endpoint.js', 'sqlcmd-options.mjs', 'sqlcmd-paths.mjs', 'disclaimer-ui.js'
+    'sql-endpoint.js', 'sqlcmd-options.mjs', 'sqlcmd-paths.mjs', 'disclaimer-ui.js',
+    'interval-metrics.mjs', 'monitor-settings.mjs', 'operations-ui.js', 'operations-ui.css',
+    'history-store.mjs', 'history-ui.js', 'history-ui.css',
+    'incident-store.mjs', 'diagnostics-ui.js', 'diagnostics-ui.css',
+    'alert-policy.mjs', 'webhook-delivery.mjs', 'alerts-operations-ui.js', 'alerts-operations-ui.css',
+    'ToolPaths.ps1', 'Dashboard-Lifecycle.ps1', 'tool-paths.mjs', 'Service-Helpers.ps1',
+    'Install-Service.ps1', 'Uninstall-Service.ps1', 'SqlPulse.Service.cs', 'Measure-Capacity.mjs'
 )
 $bootstrapNames = @('install.bat', 'install.ps1', 'uninstall.bat', 'uninstall.ps1', 'README.md')
 $unexpectedPayload = @(Get-ChildItem -LiteralPath (Join-Path $installer 'payload') -Force |

@@ -27,7 +27,7 @@ export async function alertUiRequest(fetchImpl, path, body, { timeoutMs = 60000 
 export function initAlertSettingsUi({
   el = id => document.getElementById(id), esc = escapeHtml,
   confirmDialog = async (title, message) => window.confirm(`${title}\n\n${message}`),
-  onMonitoringChanged = () => {}, fetchImpl = window.fetch.bind(window),
+  onMonitoringChanged = () => {}, onClose = () => {}, onClosed = onClose, fetchImpl = window.fetch.bind(window),
 } = {}) {
   let backdrop = el('alert-settings-backdrop');
   if (!backdrop) {
@@ -37,10 +37,10 @@ export function initAlertSettingsUi({
   }
   backdrop.innerHTML = `
     <section class="modal alert-settings-modal" role="dialog" aria-modal="true" aria-labelledby="email-settings-title" tabindex="-1">
-      <header class="email-heading"><div><h2 id="email-settings-title">Email notifications</h2><p class="email-muted">Optional, private by default, approved by you.</p></div><button type="button" class="btn ghost" id="email-close">Close</button></header>
-      <p class="email-notice">SQL Pulse detects events on the next completed poll, not instant SQL push. Email delivery may take longer. Background monitoring works without a browser only after you enable it; this computer must stay awake and the SQL Pulse Node process must keep running.</p>
+      <header class="email-heading"><div><h2 id="email-settings-title">Notifications</h2><p class="email-muted">Optional, private by default, approved by you.</p></div><button type="button" class="btn ghost" id="email-close">Close</button></header>
+      <p class="email-notice">SQL Pulse detects events on the next completed poll, not instant SQL push. Notification delivery may take longer. Background monitoring works without a browser only after you enable it; this computer must stay awake and the SQL Pulse Node process must keep running.</p>
       <form id="email-settings-form">
-        <label class="email-switch"><input id="email-enabled" type="checkbox"><span><strong>Enable email + background monitoring</strong><small>Disabled by default. Enabling requires reviewing and approving the recipients, triggers and exact templates below.</small></span></label>
+        <label class="email-switch"><input id="email-enabled" type="checkbox"><span><strong>Enable notifications + background monitoring</strong><small>Disabled by default. Enabling requires reviewing and approving the destinations, triggers and exact templates below.</small></span></label>
         <div id="email-options">
         <fieldset><legend>Recipients &amp; sender</legend><div class="email-grid">
           <label class="email-field email-wide" for="email-recipients">Recipient email addresses<textarea id="email-recipients" rows="3" maxlength="5200" placeholder="operator@example.com&#10;team@example.com"></textarea><small>One address per line, or comma-separated. Up to 20 unique recipients; addresses will be visible to each other.</small></label>
@@ -69,11 +69,11 @@ export function initAlertSettingsUi({
         <fieldset><legend>Triggers &amp; polling</legend><div class="email-grid">
           <label class="email-check"><input id="email-critical" type="checkbox" checked> Critical conditions &amp; connection unavailable</label>
           <label class="email-check"><input id="email-warning" type="checkbox"> Warning conditions</label>
-          <label class="email-check email-wide"><input id="email-recovery" type="checkbox" checked> Recovery after a condition successfully reported by email</label>
+          <label class="email-check email-wide"><input id="email-recovery" type="checkbox" checked> Recovery after a condition successfully reported by notification</label>
           <label class="email-field" for="email-interval">Poll interval (seconds)<input id="email-interval" type="number" min="30" max="1800" value="60"><small>Default 60s; minimum 30s. SQL collection time is additional.</small></label>
           <label class="email-field" for="email-cooldown">Notification cooldown (seconds)<input id="email-cooldown" type="number" min="60" max="86400" value="120"><small>Suppresses flapping and repeated events; unchanged samples never send reminders.</small></label>
-          <label class="email-check email-wide"><input id="email-server-name" type="checkbox"> Include the connection display name in emails</label>
-        </div><p class="email-muted">By default, emails contain only a generic event and UTC detection time. No SQL text, database names, server addresses, custom-counter names or metric values are sent. Enabling display names can reveal private information.</p></fieldset>
+          <label class="email-check email-wide"><input id="email-server-name" type="checkbox"> Include the connection display name in notifications</label>
+        </div><p class="email-muted">By default, notifications contain only a generic event and UTC detection time. No SQL text, database names, server addresses, custom-counter names or metric values are sent. Enabling display names can reveal private information.</p></fieldset>
         <div class="email-actions"><button type="submit" class="btn" id="email-save">Save / preview enabling</button><button type="button" class="btn ghost" id="email-test">Preview delivery test</button><button type="button" class="btn ghost" id="email-disable">Disable immediately</button></div>
         </div>
       </form>
@@ -117,6 +117,7 @@ export function initAlertSettingsUi({
     }
     return {
       enabled: el('email-enabled').checked,
+      emailEnabled: saved?.emailEnabled !== false,
       recipients: el('email-recipients').value.split(/[\n,;]+/).map(s => s.trim()).filter(Boolean),
       sender: el('email-sender').value.trim(), intervalSeconds: Number(el('email-interval').value),
       cooldownSeconds: Number(el('email-cooldown').value),
@@ -143,9 +144,9 @@ export function initAlertSettingsUi({
     microsoft = auth;
     el('email-microsoft-client').value = auth.clientId || '';
     el('email-microsoft-tenant').value = auth.tenant || 'consumers';
-    el('email-microsoft-status').textContent = auth.authenticated
+    el('email-microsoft-status').textContent = auth.authenticationError || (auth.authenticated
       ? `Signed in for email: ${auth.username}. SMTP uses OAuth2; your Microsoft password is not stored.`
-      : 'Not signed in for email. Enter your app ID, then sign in with Microsoft.';
+      : 'Not signed in for email. Enter your app ID, then sign in with Microsoft.');
   }
   function renderLogin(value) {
     login = value;
@@ -197,19 +198,21 @@ export function initAlertSettingsUi({
     if (settings.microsoft) renderMicrosoft(settings.microsoft);
     el('email-user').placeholder = settings.smtp.hasUsername ? 'Stored securely — leave blank to keep' : 'SMTP account or blank for authorized relay';
     el('email-password').placeholder = settings.smtp.hasPassword ? 'Stored securely — leave blank to keep' : 'Enter SMTP password';
-    el('email-delivery').textContent = settings.deliveryStatus ? `Last delivery: ${settings.deliveryStatus.time} — ${settings.deliveryStatus.message}` : 'No email has been sent.';
+    el('email-delivery').textContent = settings.deliveryStatus ? `Last delivery: ${settings.deliveryStatus.time} — ${settings.deliveryStatus.message}` : 'No notification has been sent.';
   }
   function showPreview(value, type) {
     if (destroyed || !el('email-enabled').checked || !backdrop.classList.contains('show')) return;
     preview = { ...value, type };
-    el('email-preview-destination').textContent = `From: ${value.sender}\nTo: ${value.recipients.join(', ')}\nSMTP: ${value.smtp.host}:${value.smtp.port} (${value.smtp.tlsMode}; ${value.smtp.authMode === 'microsoft' ? 'Microsoft OAuth2' : 'password / relay'})`;
+    el('email-preview-destination').textContent = value.emailEnabled === false ? 'Email channel disabled. Only the reviewed webhook destinations will be contacted.'
+      : `From: ${value.sender}\nTo: ${value.recipients.join(', ')}\nSMTP: ${value.smtp.host}:${value.smtp.port} (${value.smtp.tlsMode}; ${value.smtp.authMode === 'microsoft' ? 'Microsoft OAuth2' : 'password / relay'})`;
     el('email-preview-warning').textContent = value.warning;
     el('email-preview-summary').textContent = value.configSummary;
     el('email-template-hint').textContent = type === 'test'
       ? 'This test sends the exact subject and body shown below. It does not enable monitoring or save these settings.'
       : 'These are the exact outbound templates. {{time}} is replaced only by the event detection time in UTC; {{serverName}}, when opted in, is replaced by the connection display name. SQL details are never substituted.';
-    el('email-preview-templates').innerHTML = value.templates.map(t => `<article><h4>${esc(t.subject)}</h4><pre tabindex="0">${esc(t.text)}</pre></article>`).join('');
-    el('email-approve').textContent = type === 'test' ? 'Send this exact test email' : 'Approve & enable background email';
+    el('email-preview-templates').innerHTML = (value.emailEnabled === false ? [] : value.templates).map(t => `<article><h4>${esc(t.subject)}</h4><pre tabindex="0">${esc(t.text)}</pre></article>`).join('')
+      + (value.webhookTemplates || []).map(t => `<article><h4>${esc(t.destination)}</h4><pre tabindex="0">${esc(JSON.stringify(t, null, 2))}</pre></article>`).join('');
+    el('email-approve').textContent = type === 'test' ? 'Send this exact notification test' : 'Approve & enable background notifications';
     el('email-preview').hidden = false;
     el('email-preview').scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   }
@@ -235,7 +238,28 @@ export function initAlertSettingsUi({
       const pendingLogin = await api('microsoft/login-status');
       if (pendingLogin.state === 'running') { renderLogin(pendingLogin); pollMicrosoft(); }
       onMonitoringChanged(settings);
-      status(settings.enabled ? `Email enabled. Background polling every ${settings.intervalSeconds}s while the app host is awake and running.` : 'Email disabled. No background email monitoring is authorized.');
+      status(settings.enabled ? `Notifications enabled. Background polling every ${settings.intervalSeconds}s while the app host is awake and running.` : 'Notifications disabled. No background notification monitoring is authorized.');
+    });
+  }
+  async function refresh({ preserveDrafts = true } = {}) {
+    if (destroyed || busy) return;
+    const id = ++operation;
+    invalidate();
+    return perform(async () => {
+      const settings = await api('settings');
+      if (destroyed || id !== operation) return;
+      const values = preserveDrafts ? [
+        'email-recipients', 'email-sender', 'email-interval', 'email-cooldown',
+        'email-host', 'email-port', 'email-tls', 'email-user', 'email-password',
+        'email-auth-mode', 'email-microsoft-client', 'email-microsoft-tenant',
+      ].map(key => [key, el(key).value]) : [];
+      const checks = preserveDrafts ? ['email-warning', 'email-critical', 'email-recovery', 'email-server-name']
+        .map(key => [key, el(key).checked]) : [];
+      populate(settings);
+      values.forEach(([key, value]) => { el(key).value = value; });
+      checks.forEach(([key, value]) => { el(key).checked = value; });
+      renderAuthMode(); concealPassword();
+      onMonitoringChanged(settings);
     });
   }
   function close() {
@@ -245,21 +269,21 @@ export function initAlertSettingsUi({
     concealPassword();
     el('email-user').value = '';
     returnFocus?.focus();
+    onClosed();
   }
   el('email-close').addEventListener('click', close);
   async function disableEmail() {
     invalidate();
     let settings;
     try {
-      const current = await api('settings');
-      settings = await api('settings', { ...current, enabled: false });
-      if (settings.enabled !== false) throw new Error('The dashboard did not confirm that email monitoring stopped. Refresh settings before retrying.');
+      settings = await api('settings', { ...(saved || { smtp: {} }), enabled: false, disableOnly: true });
+      if (settings.enabled !== false) throw new Error('The dashboard did not confirm that notification monitoring stopped. Refresh settings before retrying.');
     } catch (error) { el('email-enabled').checked = true; throw error; }
     saved = settings;
     onMonitoringChanged(settings);
     el('email-enabled').checked = false;
     concealPassword();
-    status('Email disabled. Settings are greyed out and background email monitoring stopped; an SMTP operation already underway may finish.');
+    status('Notifications disabled. Settings are greyed out and background notification monitoring stopped; a delivery already underway may finish.');
   }
   el('email-enabled').addEventListener('change', () => {
     if (busy) return;
@@ -267,8 +291,8 @@ export function initAlertSettingsUi({
     if (!el('email-enabled').checked) {
       void perform(disableEmail);
     } else status(saved?.enabled
-      ? 'Email enabled. Review and approve any changes before applying them.'
-      : 'Settings unlocked. Background email remains disabled until you review and approve enabling.');
+      ? 'Notifications enabled. Review and approve any changes before applying them.'
+      : 'Settings unlocked. Background notifications remain disabled until you review and approve enabling.');
   });
   el('email-auth-mode').addEventListener('change', () => {
     if (el('email-auth-mode').value === 'microsoft') {
@@ -340,7 +364,7 @@ export function initAlertSettingsUi({
       else {
         const settings = await api('settings', candidate);
         populate(settings); onMonitoringChanged(settings);
-        status('Settings saved with email disabled. No message was sent.');
+        status('Settings saved with notifications disabled. No message was sent.');
       }
     });
   });
@@ -358,9 +382,9 @@ export function initAlertSettingsUi({
     if (!preview) throw new Error('Preview the recipients and message again before approval.');
     const current = preview;
     const id = operation;
-    const approved = await confirmDialog(current.type === 'test' ? 'Send the reviewed test email?' : 'Enable reviewed email monitoring?',
+    const approved = await confirmDialog(current.type === 'test' ? 'Send the reviewed notification test?' : 'Enable reviewed notification monitoring?',
       `${current.warning}\n\n${current.type === 'test' ? 'Only the exact test shown above will be sent.' : current.configSummary}`,
-      current.type === 'test' ? 'Send exact test' : 'Enable email', { danger: false });
+      current.type === 'test' ? 'Send exact test' : 'Enable notifications', { danger: false });
     if (!approved || id !== operation || preview?.previewId !== current.previewId || destroyed) return;
     invalidate();
     if (current.type === 'test') {
@@ -373,7 +397,7 @@ export function initAlertSettingsUi({
     } else {
       const settings = await api('settings-apply', { previewId: current.previewId });
       populate(settings); onMonitoringChanged(settings);
-      status(`Approved. Email monitoring is enabled with ${settings.intervalSeconds}s polling. SMTP acceptance is not guaranteed inbox delivery.`);
+      status(`Approved. Notification monitoring is enabled with ${settings.intervalSeconds}s polling. Destination acceptance is not guaranteed delivery to a person.`);
     }
     });
   });
@@ -393,11 +417,12 @@ export function initAlertSettingsUi({
   const buttons = ['alerts-email-settings', 'alert-settings-btn'].map(el).filter(Boolean);
   buttons.forEach(button => button.addEventListener('click', open));
   return {
-    open, close,
+    open, close, refresh,
     destroy() {
       destroyed = true; ++operation; invalidate(); el('email-password').value = ''; el('email-user').value = '';
       clearTimeout(loginTimer);
       concealPassword();
+      onClosed();
       document.removeEventListener('keydown', keydown); buttons.forEach(button => button.removeEventListener('click', open));
       backdrop.remove();
     },

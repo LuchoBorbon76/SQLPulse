@@ -43,7 +43,7 @@ test('wait scope excludes all unrelated SQL, credentials, counters, metadata, an
 });
 
 test('each visual includes only its own bounded and whitelisted section', () => {
-  for (const scope of Object.keys(VISUAL_SCOPES).filter(s => !['instance', 'timeline', 'custom_counters'].includes(s))) {
+  for (const scope of Object.keys(VISUAL_SCOPES).filter(s => !['instance', 'timeline', 'custom_counters', 'history'].includes(s))) {
     const selected = selectVisualContext(sample, history, { scope });
     assert.ok(Object.hasOwn(selected, scope));
     for (const other of Object.keys(VISUAL_SCOPES).filter(s => s !== scope && s !== 'instance')) {
@@ -55,6 +55,7 @@ test('each visual includes only its own bounded and whitelisted section', () => 
   assert.equal(selected.waits.length, 15);
   assert.equal(selected.totalRows, 100);
   assert.equal(selectVisualContext({ ...sample, buffer_pool: null }, [], { scope: 'buffer_pool' }).buffer_pool, null);
+  assert.throws(() => selectVisualContext(sample, history, { scope: 'history' }), /persisted selected time window/);
 });
 
 test('query scope preserves real collector query fields and only selected query text', () => {

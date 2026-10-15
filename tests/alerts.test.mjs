@@ -43,6 +43,116 @@ async function fixture(t, overrides = {}) {
   return { service, calls, warnings, directory, options, enable, advance: milliseconds => { clock += milliseconds; } };
 }
 
+test('ready empty interval waits recover interval issue keys even when cumulative waits remain high', async t => {
+  const { service, calls, enable, advance } = await fixture(t);
+  await enable();
+  const waiting = { status: 'ready', rows: [{ wait_type: 'WRITELOG', wait_time_s: 100, signal_wait_s: 30 }] };
+  assert.equal((await service.observe(server, { ...healthy, intervals: { elapsedSeconds: 60, waits: waiting } })).sent, true);
+  advance(120000);
+  const recovered = await service.observe(server, {
+    ...healthy, waits: [{ wait_type: 'WRITELOG', wait_time_s: 999999, signal_wait_s: 333333 }],
+    intervals: { elapsedSeconds: 60, waits: { status: 'ready', rows: [] } },
+  });
+  assert.equal(recovered.sent, true);
+  assert.equal(calls.length, 2); assert.equal(calls[1].subject, 'SQL Pulse: Recovery');
+});
+
+test('interval wait recovery rejects missing, reset, partial, malformed and nonpositive intervals', async t => {
+  const { service, calls, enable, advance } = await fixture(t);
+  await enable();
+  await service.observe(server, { ...healthy, intervals: { elapsedSeconds: 60,
+    waits: { status: 'ready', rows: [{ wait_type: 'WRITELOG', wait_time_s: 100, signal_wait_s: 30 }] },
+  } });
+  advance(120000);
+  const invalid = [
+    null, { elapsedSeconds: 60 },
+    { elapsedSeconds: 60, waits: { status: 'unavailable', reason: 'restart', rows: [] } },
+    { elapsedSeconds: 60, waits: { status: 'partial', rows: [] } },
+    { elapsedSeconds: 60, waits: { status: 'ready', rows: [{ wait_type: 'WRITELOG', wait_time_s: null, signal_wait_s: 0 }] } },
+    { elapsedSeconds: 60, waits: { status: 'ready' } },
+    ...[null, 0, -1].map(elapsedSeconds => ({ elapsedSeconds, waits: { status: 'ready', rows: [] } })),
+  ];
+  for (const intervals of invalid) {
+    const sample = { ...healthy, waits: [], ...(intervals ? { intervals } : {}) };
+    assert.equal((await service.observe(server, sample)).skipped, 'recovery-not-confirmed');
+  }
+  assert.equal(calls.length, 1);
+  assert.equal((await service.observe(server, { ...healthy, intervals: { elapsedSeconds: 60, waits: { status: 'ready', rows: [] } } })).sent, true);
+});
+
+test('a historical wait alert also requires a valid interval once interval scoring is present', async t => {
+  const { service, calls, enable, advance } = await fixture(t);
+  await enable();
+  await service.observe(server, { ...healthy, waits: [{ wait_type: 'WRITELOG', wait_time_s: 100, signal_wait_s: 0 }] });
+  advance(120000);
+  assert.equal((await service.observe(server, { ...healthy, waits: [],
+    intervals: { elapsedSeconds: null, waits: { status: 'unavailable', reason: 'counter-reset', rows: [] } },
+  })).skipped, 'recovery-not-confirmed');
+  assert.equal((await service.observe(server, { ...healthy,
+    intervals: { elapsedSeconds: 60, waits: { status: 'ready', rows: [] } },
+  })).sent, true);
+  assert.equal(calls.length, 2);
+});
+
+test('interval file recovery persists its source and requires every affected category row to be observed', async t => {
+  for (const type of ['LOG', 'ROWS']) {
+    const f = await fixture(t); await f.enable();
+    const file = { file_type: type, status: 'ready', avg_read_latency_ms: type === 'ROWS' ? 100 : 1,
+      avg_write_latency_ms: type === 'LOG' ? 100 : 1 };
+    const good = { ...file, avg_read_latency_ms: 1, avg_write_latency_ms: 1 };
+    const lifetime = [{ file_type: type, avg_read_latency_ms: 1, avg_write_latency_ms: 1 }];
+    assert.equal((await f.service.observe(server, { ...healthy, file_io: lifetime,
+      intervals: { elapsedSeconds: 60, file_io: { status: 'ready', rows: [file] } },
+    })).sent, true);
+    const restarted = createAlertService(f.options); t.after(() => restarted.close());
+    f.advance(120000);
+    const invalid = [
+      null, { elapsedSeconds: 60 },
+      { elapsedSeconds: 60, file_io: { status: 'unavailable', reason: 'restart', rows: [] } },
+      { elapsedSeconds: 60, file_io: { status: 'ready', reason: 'counter-reset', rows: [good] } },
+      { elapsedSeconds: 60, file_io: { status: 'ready', rows: [] } },
+      { elapsedSeconds: 60, file_io: { status: 'ready', rows: [{ ...good, file_type: type === 'LOG' ? 'ROWS' : 'LOG' }] } },
+      { elapsedSeconds: 60, file_io: { status: 'partial', rows: [good, { ...good, status: 'unavailable', reason: 'first-sample' }] } },
+      { elapsedSeconds: 60, file_io: { status: 'ready', rows: [{ ...good, avg_write_latency_ms: null }] } },
+      { elapsedSeconds: 0, file_io: { status: 'ready', rows: [good] } },
+      ...(type === 'ROWS' ? [{ elapsedSeconds: 60, file_io: { status: 'ready', rows: [{ ...good, avg_read_latency_ms: null }] } }] : []),
+    ];
+    for (const intervals of invalid) {
+      const result = await restarted.observe(server, { ...healthy, file_io: lifetime, ...(intervals ? { intervals } : {}) });
+      assert.equal(result.skipped, 'recovery-not-confirmed', `${type}: ${JSON.stringify(intervals)}`);
+    }
+    assert.equal((await restarted.observe(server, { ...healthy, file_io: lifetime,
+      intervals: { elapsedSeconds: 60, file_io: { status: 'ready', rows: [good] } },
+      sectionMetadata: { file_io: { stale: true } },
+    })).skipped, 'recovery-not-confirmed');
+    assert.equal(f.calls.length, 1);
+    const recovered = await restarted.observe(server, { ...healthy,
+      file_io: [{ file_type: type, avg_read_latency_ms: 100, avg_write_latency_ms: 100 }],
+      intervals: { elapsedSeconds: 60, file_io: { status: 'partial', rows: [
+        good, { file_type: type === 'LOG' ? 'ROWS' : 'LOG', status: 'unavailable', reason: 'first-sample' },
+      ] } },
+    });
+    assert.equal(recovered.sent, true);
+    assert.equal(f.calls.length, 2); assert.equal(f.calls[1].subject, 'SQL Pulse: Recovery');
+  }
+});
+
+test('advanced settings revision guards prevent a save between fresh settings fetch and preview from restoring stale destinations', async t => {
+  const { service, enable } = await fixture(t); await enable();
+  const stale = await service.settings();
+  await enable(config({ recipients: ['new@example.com'] }));
+  const latest = await service.settings();
+  assert.ok(latest.revision > stale.revision);
+  await assert.rejects(service.prepareSettingsPreview({ ...stale, enabled: true, policy: { sustainSamples: 2 } }),
+    error => error.status === 409 && /settings changed/.test(error.message));
+  const preview = await service.prepareSettingsPreview({ ...latest, enabled: true, policy: { sustainSamples: 2 } });
+  assert.equal(preview.revision, latest.revision);
+  assert.deepEqual(preview.recipients, ['new@example.com']);
+  const applied = await service.applySettings({ previewId: preview.previewId });
+  assert.deepEqual(applied.recipients, ['new@example.com']);
+  assert.equal(applied.revision, latest.revision + 1);
+});
+
 test('email starts disabled with 60-second polling and sends nothing without opt-in', async t => {
   const { service, calls } = await fixture(t);
   const settings = await service.settings();
@@ -690,6 +800,7 @@ test('UI mounts a separate dialog and its only send path requires recipient/temp
   assert.match(source, /api\('settings-apply', \{ previewId: current.previewId \}\)/);
   assert.doesNotMatch(source, /approval: current\.previewId/);
   assert.match(source, /confirmDialog/);
-  assert.match(source, /value\.templates\.map/);
+  assert.match(source, /value\.templates\)\.map/);
+  assert.match(source, /value\.webhookTemplates/);
   assert.doesNotMatch(source, /localStorage|sessionStorage/);
 });

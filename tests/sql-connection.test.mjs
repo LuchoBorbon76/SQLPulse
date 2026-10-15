@@ -14,6 +14,10 @@ import { createMonitorScheduler } from '../monitor-scheduler.mjs';
 import { computeHealth } from '../health.js';
 import { normalizeCounter, validateCounterSql } from '../counters.mjs';
 import { createAlertService } from '../alerts.mjs';
+import { createIncidentService } from '../incident-store.mjs';
+import { createHistoryStore } from '../history-store.mjs';
+import { createMonitorSettings } from '../monitor-settings.mjs';
+import { createIntervalMetrics } from '../interval-metrics.mjs';
 import { classifySqlEndpoint } from '../sql-endpoint.js';
 import {
   buildSqlcmdArgs, validateConnectionConfig, normalizeTenant, sqlcmdEnvironment, sqlcmdFailure, redactSqlDiagnostic,
@@ -64,6 +68,10 @@ async function serverFixture(t, overrides = {}) {
     createAlertService: options => ({ ...createAlertService(options), removeServer: async () => {} }),
     createMicrosoftEmailAuth: () => ({ settings: async () => ({ clientId: '', tenant: 'consumers', authenticated: false, username: '', revision: 0 }) }),
     DATA_DIR: directory,
+    createIncidentService, storageErrors: {}, shutdownController: new AbortController(), AbortSignal,
+    monitorOperations: createMonitorSettings({ settingsFile: path.join(directory, 'monitor-settings.json') }),
+    historical: createHistoryStore({ dataDir: directory }),
+    deriveIntervalMetrics: createIntervalMetrics().sample,
     connectionProgress: createConnectionProgress(), connectionAbortError, throwIfConnectionAborted, commitConnection,
     classifySqlEndpoint, validateConnectionConfig, buildSqlcmdArgs, sqlcmdEnvironment, sqlcmdFailure, redactSqlDiagnostic,
     encryptPassword: async value => value ? 'enc:v1:aXY=:dGFn:Y2lwaGVy' : '',
@@ -470,8 +478,10 @@ test('CLI SQL token matching verifies user claims, expiry/audience and guest ide
 
 test('valid cached CLI SQL session checks scoped and default tenants and does not launch login', async () => {
   const calls = [];
+  let toolLookups = 0;
   const auth = createAzureSqlAuth({
     platform: 'win32', now: () => clock,
+    resolveCli: () => { toolLookups++; return 'C:\\Verified Tools\\az.cmd'; },
     execFileImpl: (exe, args, options, callback) => {
       calls.push({ exe, args, options });
       callback(null, tokenResponse(), '');
@@ -484,6 +494,8 @@ test('valid cached CLI SQL session checks scoped and default tenants and does no
   });
   assert.equal(operations, 1);
   assert.equal(calls.length, 2);
+  assert.equal(toolLookups, 1);
+  assert.ok(calls.every(call => call.options.windowsVerbatimArguments === true));
   assert.ok(calls.every(call => call.args.at(-1).includes('account get-access-token')));
   assert.match(calls[0].args.at(-1), new RegExp('--tenant ' + tenantA));
   assert.equal(calls[1].args.at(-1).includes('--tenant'), false);

@@ -10,6 +10,7 @@ import { createMonitorScheduler } from '../monitor-scheduler.mjs';
 import { classifySqlEndpoint } from '../sql-endpoint.js';
 import { redactSqlDiagnostic } from '../sqlcmd-options.mjs';
 import { createCounterRunner } from '../counters.mjs';
+import { createIntervalMetrics } from '../interval-metrics.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const source = await readFile(path.join(root, 'server.mjs'), 'utf8');
@@ -73,6 +74,7 @@ function collectorFixture() {
   };
   const context = {
     Date: FakeDate, WAIT_EXCLUDES: "N'SLEEP_TASK'", sectionCollector: createSectionCache({ now: () => clock }),
+    deriveIntervalMetrics: createIntervalMetrics().sample,
     classifySqlEndpoint, redactSqlDiagnostic, console: { error() {} },
     isAzureDbLike: value => classifySqlEndpoint(value.server, value.connectionType, value.engineEdition).kind === 'azure-sqldb',
     isAzureSqlDb: value => value.engineEdition === 5,
@@ -486,7 +488,7 @@ test('queued deleted servers and invalidated in-flight samples never reappear in
   test('email monitoring rechecks the current persisted pause state and never treats pause as unavailable or recovery', async () => {
     const servers = [cfg('one', { monitoringPaused: true })], calls = [];
     const context = {
-      emailMonitoringEnabled: true, loadServers: async () => servers,
+      emailMonitoringEnabled: true, loadServers: async () => servers, shutdownController: new AbortController(),
       emailAlerts: { observe: async (...args) => calls.push(args) }, console: { error() {} },
     };
     vm.runInNewContext(section('async function observeEmail(', 'const monitor =')+'\nglobalThis.observe=observeEmail;', context);
@@ -495,6 +497,9 @@ test('queued deleted servers and invalidated in-flight samples never reappear in
     assert.equal(calls.length, 0);
     servers[0].monitoringPaused = false;
     await context.observe(servers[0], { instance: {} });
+    assert.equal(calls.length, 1);
+    context.shutdownController.abort();
+    await context.observe(servers[0], null, { error: new Error('intentional shutdown') });
     assert.equal(calls.length, 1);
   });
 
@@ -627,4 +632,50 @@ test('invalid saved counters do not discard otherwise healthy core metrics and r
   assert.equal(data.custom_counters, null);
   assert.equal(data.sectionMetadata.custom_counters.stale, true);
   assert.match(data.sectionMetadata.custom_counters.error, /configuration/);
+});
+
+test('collection policy preserves default cadence and independently bounds inventory and Query Store intervals', async () => {
+  const fixture = collectorFixture(), value = cfg();
+  const policy = { inventoryIntervalSeconds: 600, queryStoreIntervalSeconds: 180, bufferPoolEnabled: true };
+  const first = await fixture.collect(value, policy);
+  assert.equal(first.sectionMetadata.databases.intervalSeconds, 600);
+  assert.equal(first.sectionMetadata.top_queries.intervalSeconds, 180);
+  fixture.advance(180000);
+  await fixture.collect(value, policy);
+  assert.deepEqual(fixture.calls.map(call => call.tag), ['metrics', 'inventory', 'topq', 'metrics', 'topq']);
+  fixture.advance(420000);
+  await fixture.collect(value, policy);
+  assert.equal(fixture.calls.filter(call => call.tag === 'inventory').length, 2);
+  assert.equal(fixture.calls.filter(call => call.tag === 'topq').length, 3);
+});
+
+test('disabling buffer-pool inventory omits descriptor SQL, does not reuse an enabled result and marks it explicitly unavailable', async () => {
+  const fixture = collectorFixture(), value = cfg();
+  const enabled = await fixture.collect(value);
+  assert.equal(enabled.buffer_pool[0].buffer_mb, 10);
+  const disabled = await fixture.collect(value, { bufferPoolEnabled: false });
+  assert.equal(disabled.buffer_pool, null);
+  assert.equal(disabled.sectionMetadata.buffer_pool.applicable, false);
+  assert.equal(disabled.sectionMetadata.buffer_pool.disabled, true);
+  assert.equal(disabled.sectionMetadata.buffer_pool.reason, 'disabled-by-policy');
+  assert.equal(disabled.sectionMetadata.buffer_pool.sampledAt, null);
+  assert.equal(disabled.sectionMetadata.buffer_pool.stale, false);
+  const inventory = fixture.calls.filter(call => call.tag === 'inventory');
+  assert.equal(inventory.length, 2);
+  assert.doesNotMatch(inventory[1].sql, /dm_os_buffer_descriptors|@buffer_pool/);
+  assert.match(inventory[1].sql, /dm_db_missing_index|backupset/);
+  const count = fixture.calls.length;
+  await fixture.collect(value, { bufferPoolEnabled: false });
+  assert.equal(fixture.calls.length, count + 1);
+});
+
+test('invalid collection policies fail before SQL; inclusive policy limits are accepted', async () => {
+  const fixture = collectorFixture();
+  for (const policy of [null, [], { inventoryIntervalSeconds: 59 }, { inventoryIntervalSeconds: 86401 },
+    { queryStoreIntervalSeconds: 60.5 }, { queryStoreIntervalSeconds: '120' }, { bufferPoolEnabled: null }]) {
+    await assert.rejects(fixture.collect(cfg(), policy), /policy|interval|enabled/);
+  }
+  assert.equal(fixture.calls.length, 0);
+  await fixture.collect(cfg(), { inventoryIntervalSeconds: 60, queryStoreIntervalSeconds: 86400 });
+  assert.equal(fixture.calls.length, 3);
 });

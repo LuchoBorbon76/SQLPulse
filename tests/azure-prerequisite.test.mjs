@@ -2,25 +2,28 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { readFile } from 'node:fs/promises';
-import { createAzurePrerequisite, isRegisteredAzure, azureReadinessFailure } from '../azure-prerequisite.mjs';
+import { createAzurePrerequisite, isRegisteredAzure } from '../azure-prerequisite.mjs';
+import { classifySqlEndpoint } from '../sql-endpoint.js';
 import { createMonitorScheduler } from '../monitor-scheduler.mjs';
 import { createCollectorCache, configIdentity, connectionIdentity } from '../collector-cache.mjs';
 
 const azure = (id = 'azure', extra = {}) => ({ id, server: 'demo.database.windows.net', auth: 'windows', ...extra });
 const settle = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
-function fixture(initial = [azure()], customProbe) {
-  let time = 1000000, servers = initial, result = true;
-  const calls = [], timers = new Map(), changes = [];
+function fixture(initial = [azure()]) {
+  let servers = initial, failure;
+  const calls = [], timers = new Map(), changes = [], errors = [];
   let nextTimer = 0;
   const service = createAzurePrerequisite({
-    getServers: async () => servers, now: () => time,
-    probe: async (server, options) => { calls.push({ server, options }); return customProbe ? customProbe(server, options) : result; },
+    getServers: async () => { if (failure) throw failure; return servers; },
+    probe: async () => { calls.push('Unexpected SQL probe'); throw new Error('Must not probe'); },
     setTimer: (callback, delay) => { const id = ++nextTimer; timers.set(id, { callback, delay }); return id; },
     clearTimer: id => timers.delete(id), onChange: enabled => changes.push(enabled),
+    onError: message => errors.push(message),
   });
-  return { service, calls, timers, changes, setResult: value => { result = value; },
+  return { service, calls, timers, changes, errors, failRead: value => { failure = value; },
     setServers: value => { servers = value; return service.reconcile(servers); },
-    advance: ms => { time += ms; }, async start() { service.start(); await service.idle(); await settle(); } };
+    editRegistry: value => { servers = value; },
+    async start() { service.start(); await service.idle(); await settle(); } };
 }
 
 test('registration uses shared classifier, engine precedence and explicit custom Azure hostnames', () => {
@@ -29,40 +32,6 @@ test('registration uses shared classifier, engine precedence and explicit custom
   assert.equal(isRegisteredAzure(azure('known', { server: 'custom', engineEdition: 8 })), true);
   assert.equal(isRegisteredAzure(azure('wrong', { engineEdition: 3 })), false);
   assert.equal(isRegisteredAzure(azure('local', { server: 'onprem' })), false);
-});
-
-test('registered MI account mismatch is actionable and public status never includes raw diagnostics or secrets', async () => {
-  const f = fixture([azure('existing-mi', { connectionType: 'azure-mi', engineEdition: 8 })], async () => {
-    throw new Error('Azure CLI account does not match the configured user. PRIVATE_TOKEN PRIVATE_USER');
-  });
-  await f.start();
-  const status = f.service.status();
-  assert.equal(status.registeredCount, 1);
-  assert.equal(status.reason, 'connectivity-required');
-  assert.equal(status.eligible, false);
-  assert.equal(status.servers[0].failure, 'account-mismatch');
-  assert.match(status.servers[0].guidance, /Sign in again/);
-  assert.doesNotMatch(JSON.stringify(status), /PRIVATE_TOKEN|PRIVATE_USER/);
-  f.service.stop();
-  for (const [message, failure] of [
-    ['AADSTS50076: MFA required private', 'sign-in-required'],
-    ['SQL token expired private', 'sign-in-required'],
-    ['Login failed for user private', 'sql-access'],
-    ['dial tcp timed out private', 'timeout'],
-    ['unexpected EOF private', 'connectivity'],
-  ]) {
-    const result = azureReadinessFailure(new Error(message));
-    assert.equal(result.failure, failure);
-    assert.doesNotMatch(result.guidance, /private/);
-  }
-});
-
-test('banner reviews existing registered Azure connections rather than suggesting duplicate registration', async () => {
-  const source = await readFile(new URL('../index.html', import.meta.url), 'utf8');
-  assert.match(source, /already registered/);
-  assert.match(source, /Do not add a duplicate connection/);
-  assert.match(source, /registered \? 'Review existing connection' : 'Add Azure connection'/);
-  assert.match(source, /if \(existing\) \{ openModal\(existing\); return; \}/);
 });
 
 test('empty and SQL Server-only inventories stay locked and do not probe', async () => {
@@ -75,114 +44,266 @@ test('empty and SQL Server-only inventories stay locked and do not probe', async
   }
 });
 
-test('cold start is checking; paused Azure is probed without resuming it', async () => {
+test('cold start unlocks from saved registration immediately without SQL, credentials or token access', async () => {
   const server = azure('paused', { monitoringPaused: true });
+  Object.defineProperty(server, 'passwordEnc', { get() { throw new Error('Must not read credentials'); } });
   const f = fixture([server]);
-  assert.equal(f.setServers([server]).reason, 'checking');
+  assert.equal(f.setServers([server]).reason, 'ready');
   await f.start();
   assert.equal(f.service.status().eligible, true);
   assert.equal(server.monitoringPaused, true);
   assert.deepEqual(f.changes, [true]);
-  assert.ok(f.calls[0].options.signal instanceof AbortSignal);
+  assert.equal(f.calls.length, 0);
   f.service.stop();
 });
 
-test('all failed checks lock immediately; independent timer recovers without normal collection', async () => {
+test('paused, unreachable, account mismatch, expired tokens and offline services never affect registration eligibility', async () => {
+  for (const failure of ['paused', 'unreachable', 'account-mismatch', 'sign-in-required', 'token-expired', 'service-offline']) {
+    const server = azure('existing-mi', { server: 'custom.invalid', connectionType: 'azure-mi', engineEdition: 8,
+      monitoringPaused: true, status: failure, error: 'PRIVATE_DIAGNOSTIC', passwordEnc: 'PRIVATE_SECRET' });
+    const f = fixture([server]);
+    await f.start();
+    const generation = f.service.status().generation;
+    f.setServers([{ ...server, user: 'different', tenant: 'different', passwordEnc: 'changed' }]);
+    await f.service.tick();
+    const status = f.service.status();
+    assert.equal(status.eligible, true, failure);
+    assert.equal(status.reason, 'ready');
+    assert.equal(status.registeredCount, 1);
+    assert.deepEqual(status.servers, [{ id: 'existing-mi', state: 'registered' }]);
+    assert.equal(status.generation, generation);
+    assert.equal('reachableCount' in status, false);
+    assert.equal('freshnessMs' in status, false);
+    assert.doesNotMatch(JSON.stringify(status), /PRIVATE|password|different|custom/);
+    assert.equal(f.calls.length, 0);
+    f.service.stop();
+  }
+});
+
+test('eligibility never expires with elapsed time or clock changes', async () => {
+  const realNow = Date.now;
   const f = fixture();
-  f.setResult(false);
+  try {
+    await f.start();
+    const generation = f.service.status().generation;
+    for (const time of [0, 1, 9999999999999]) {
+      Date.now = () => time;
+      await f.service.tick();
+      assert.equal(f.service.status().eligible, true);
+      assert.equal(f.service.status().generation, generation);
+    }
+    assert.equal(f.calls.length, 0);
+  } finally { Date.now = realNow; f.service.stop(); }
+});
+
+test('only removal or reclassification of the last Azure registration changes eligibility and generation', async () => {
+  const f = fixture([azure('a'), azure('b')]);
   await f.start();
-  assert.equal(f.service.status().reason, 'connectivity-required');
-  f.setResult(true);
-  f.advance(60000);
-  const timer = [...f.timers.values()].find(item => item.delay === 5000);
-  await timer.callback();
+  const generation = f.service.status().generation;
+  assert.equal(f.setServers([azure('a')]).generation, generation);
+  assert.equal(f.setServers([azure('a', { connectionType: 'sql-server', engineEdition: 3 })]).reason, 'registration-required');
+  assert.equal(f.service.status().generation, generation + 1);
+  assert.equal(f.setServers([azure('replacement', { server: 'custom', engineEdition: 8 })]).eligible, true);
+  assert.equal(f.service.status().generation, generation + 2);
+  await f.service.idle();
+  f.service.stop();
+});
+
+test('periodic local registry refresh discovers external first-add and last-remove edits without probing', async () => {
+  const f = fixture([]);
+  await f.start();
+  f.editRegistry([azure()]);
+  await [...f.timers.values()].find(item => item.delay === 5000).callback();
   await f.service.idle();
   assert.equal(f.service.status().eligible, true);
-  f.advance(60000);
-  f.setResult(false);
+  f.editRegistry([]);
+  await f.service.tick(); await f.service.idle();
+  assert.equal(f.service.status().reason, 'registration-required');
+  assert.deepEqual(f.changes, [true, false]);
+  assert.equal(f.calls.length, 0);
+  f.service.stop();
+});
+
+test('registry corruption fails closed with safe explicit reporting and recovers from a readable registry', async () => {
+  const f = fixture();
+  await f.start();
+  f.failRead(new Error('PRIVATE_TOKEN malformed registry'));
   await f.service.tick(); await f.service.idle();
   assert.equal(f.service.status().eligible, false);
-  assert.deepEqual(f.changes, [true, false]);
+  assert.equal(f.service.status().reason, 'registration-unavailable');
+  assert.equal(f.service.status().registeredCount, null);
+  assert.match(f.errors[0], /saved connection registry/);
+  assert.doesNotMatch(f.errors.join(''), /PRIVATE_TOKEN/);
+  f.failRead(null);
+  f.editRegistry({ invalid: true });
+  await f.service.tick(); await f.service.idle();
+  assert.equal(f.errors.length, 2);
+  assert.equal(f.service.status().reason, 'registration-unavailable');
+  f.editRegistry([azure()]);
+  await f.service.tick(); await f.service.idle();
+  assert.equal(f.service.status().eligible, true);
+  assert.deepEqual(f.changes, [true, false, true]);
   f.service.stop();
 });
 
-test('one of multiple registered Azure services suffices and public status contains no credentials', async () => {
-  const f = fixture([azure('bad'), azure('good', { passwordEnc: 'secret', tenant: 'private' })], async server => server.id === 'good');
-  await f.start();
-  assert.equal(f.service.status().reachableCount, 1);
-  assert.equal(f.service.status().registeredCount, 2);
-  assert.doesNotMatch(JSON.stringify(f.service.status()), /secret|private|password|demo/);
-  f.service.stop();
+test('monitoring configuration errors are explicitly reported without changing registration eligibility', async () => {
+  const errors = [];
+  const service = createAzurePrerequisite({ getServers: async () => [azure()],
+    onChange: async () => { throw new Error('PRIVATE_CONFIG'); }, onError: message => errors.push(message) });
+  service.start(); await service.idle();
+  assert.equal(service.status().eligible, true);
+  assert.match(errors[0], /configuration could not be applied/);
+  assert.doesNotMatch(errors[0], /PRIVATE_CONFIG/);
+  service.stop();
 });
 
-test('expired success cannot unlock; deleting last registration invalidates immediately', async () => {
-  const f = fixture(); await f.start();
-  const generation = f.service.status().generation;
-  f.advance(120000);
-  assert.equal(f.service.status().eligible, false);
-  assert.equal(f.service.status().servers[0].state, 'stale');
-  assert.ok(f.service.status().generation > generation);
-  assert.equal(f.setServers([]).reason, 'registration-required');
-  f.service.stop();
-});
-
-test('credential or endpoint edits reject stale probe completions and cached identity', async () => {
+test('a delayed registry read cannot overwrite a newer saved registration change', async () => {
   let finish;
-  const f = fixture([azure()], () => new Promise(resolve => { finish = resolve; }));
-  f.service.start(); await settle();
-  f.setServers([azure('azure', { user: 'other-account' })]);
-  assert.equal(f.calls[0].options.signal.aborted, true);
-  finish(true); await f.service.idle();
-  assert.equal(f.service.status().eligible, false);
-  assert.equal(f.service.status().reason, 'checking');
-  f.service.stop();
+  const service = createAzurePrerequisite({ getServers: () => new Promise(resolve => { finish = resolve; }) });
+  service.start();
+  service.reconcile([azure()]);
+  finish([]);
+  await service.idle();
+  assert.equal(service.status().eligible, true);
+  service.stop();
 });
 
-test('loop bounds concurrent probes, does not overlap, aborts and drains shutdown', async () => {
-  let active = 0, peak = 0;
-  const f = fixture([azure('a'), azure('b'), azure('c')], (_server, { signal }) => new Promise(resolve => {
-    active++; peak = Math.max(peak, active);
-    signal.addEventListener('abort', () => { active--; resolve(false); }, { once: true });
-  }));
-  f.service.start(); await settle();
-  await Promise.all([f.service.tick(), f.service.tick()]);
-  assert.equal(f.calls.length, 2);
-  assert.equal(peak, 2);
-  f.service.stop(); await f.service.idle();
-  assert.equal(active, 0);
-  assert.equal(f.timers.size, 0);
-  assert.equal(f.service.status().eligible, false);
-  await f.service.tick();
-  assert.equal(f.calls.length, 2);
-});
-
-test('deadline fails closed, even when a late probe returns success', async () => {
-  let finish;
-  const f = fixture([azure()], () => new Promise(resolve => { finish = resolve; }));
-  f.service.start(); await settle();
-  [...f.timers.values()].find(item => item.delay === 55000).callback();
-  finish(true); await f.service.idle();
-  assert.equal(f.service.status().eligible, false);
-  f.service.stop();
-});
-
-test('shutdown during registry reconciliation neither starts new probes nor accepts completed evidence', async () => {
-  for (const delayedRead of [1, 2]) {
-    let reads = 0, probes = 0, finishRead;
+test('shutdown and restart discard stale reads and notifications, drain jobs and clear timers', async () => {
+  for (const rejectOld of [false, true]) {
+    const reads = [], changes = [], errors = [], timers = new Set();
     const service = createAzurePrerequisite({
-      getServers: () => ++reads === delayedRead ? new Promise(resolve => { finishRead = resolve; }) : Promise.resolve([azure()]),
-      probe: async () => { probes++; return true; },
-      setTimer: () => 0, clearTimer() {},
+      getServers: () => new Promise((resolve, reject) => reads.push({ resolve, reject })),
+      onChange: enabled => changes.push(enabled), onError: message => errors.push(message),
+      setTimer: callback => { timers.add(callback); return callback; }, clearTimer: callback => timers.delete(callback),
     });
     service.start();
-    await settle();
-    assert.equal(typeof finishRead, 'function');
+    assert.equal(service.tick(), service.tick());
+    service.reconcile([azure()]);
     service.stop();
-    finishRead([azure()]);
+    service.start();
+    reads[1].resolve([]);
+    await settle();
+    if (rejectOld) reads[0].reject(new Error('obsolete read'));
+    else reads[0].resolve([azure()]);
     await service.idle();
-    assert.equal(probes, delayedRead - 1);
     assert.equal(service.status().eligible, false);
+    assert.equal(service.status().reason, 'registration-required');
+    assert.deepEqual(changes, []);
+    assert.deepEqual(errors, []);
+    assert.equal(timers.size, 1);
+    service.stop(); await service.idle(); await service.tick();
+    service.reconcile([azure()]);
+    assert.equal(service.status().eligible, false);
+    assert.equal(timers.size, 0);
+    assert.equal(reads.length, 2);
   }
+});
+
+test('constructor rejects missing registry loaders and invalid refresh intervals', () => {
+  assert.throws(() => createAzurePrerequisite(), /getServers/);
+  for (const intervalMs of [0, -1, NaN, Infinity]) {
+    assert.throws(() => createAzurePrerequisite({ getServers: async () => [], intervalMs }), /intervalMs/);
+  }
+});
+
+async function frontendFixture(fetchStatus = async () => { throw new Error('Local service unavailable'); }) {
+  const source = await readFile(new URL('../index.html', import.meta.url), 'utf8');
+  const nodes = new Map(), events = { stopped: 0, cancelled: 0, refreshed: 0 };
+  const context = {
+    fetch: fetchStatus, AbortSignal, servers: [], classifySqlEndpoint, Promise,
+    el: id => { if (!nodes.has(id)) nodes.set(id, {}); return nodes.get(id); },
+    fleetUI: { stop: () => events.stopped++, setServers() {}, getServer() {} },
+    cancelDetailRequests: () => events.cancelled++, setStatus() {},
+    updateDetailActions() {}, updatePauseControls() {}, renderServerList() {},
+    dashboardStarted: true, historyController: null, currentViewPaused: () => false,
+    refreshCurrentView: () => events.refreshed++, invalidateClientMetrics() {},
+    sqlEndpointReady: Promise.resolve(), registryRequest: async () => context.servers,
+  };
+  vm.createContext(context);
+  const first = source.indexOf('let azureReadiness ='), last = source.indexOf('let detailGeneration =', first);
+  vm.runInContext(source.slice(first, last) + `
+    globalThis.registrationUI = {
+      apply: applyAzureReadiness, fromInventory: applyServerRegistrations, poll: pollAzureReadiness,
+      status: () => azureReadiness
+    };`, context);
+  const loader = source.indexOf('async function loadServers(){');
+  vm.runInContext(source.slice(loader, source.indexOf('function renderServerList()', loader)), context);
+  return { context, ui: context.registrationUI, nodes, events };
+}
+
+test('frontend hides the banner and duplicate registration CTA for any saved Azure including paused failed MI', async () => {
+  const source = await readFile(new URL('../index.html', import.meta.url), 'utf8');
+  assert.match(source, /#azure-prerequisite-banner\[hidden\],#azure-prerequisite-add\[hidden\]\{display:none;\}/);
+  const f = await frontendFixture();
+  f.context.servers = [azure('saved-mi', { server: 'custom.invalid', connectionType: 'azure-mi',
+    engineEdition: 8, monitoringPaused: true, status: 'authentication-failed' })];
+  await f.context.loadServers();
+  assert.equal(f.ui.status().eligible, true);
+  assert.equal(f.nodes.get('azure-prerequisite-banner').hidden, true);
+  assert.equal(f.nodes.get('azure-prerequisite-add').hidden, true);
+  assert.equal(f.events.stopped, 0);
+  await f.ui.poll();
+  assert.equal(f.ui.status().eligible, true);
+  assert.equal(f.nodes.get('azure-prerequisite-banner').hidden, true);
+  assert.equal(f.events.stopped, 0);
+  f.context.servers = [];
+  await f.context.loadServers();
+  assert.equal(f.ui.status().reason, 'registration-required');
+  assert.equal(f.nodes.get('azure-prerequisite-banner').hidden, false);
+  assert.equal(f.nodes.get('azure-prerequisite-add').hidden, false);
+});
+
+test('status transport, HTTP and malformed response failures preserve known registration eligibility', async () => {
+  for (const fetchStatus of [
+    async () => { throw new Error('offline'); },
+    async () => ({ ok: false }),
+    async () => ({ ok: true, json: async () => ({ unexpected: true }) }),
+  ]) {
+    const f = await frontendFixture(fetchStatus);
+    f.context.servers = [azure()];
+    f.ui.fromInventory();
+    await f.ui.poll();
+    assert.equal(f.ui.status().eligible, true);
+    assert.equal(f.ui.status().registeredCount, 1);
+    assert.equal(f.events.stopped, 0);
+    assert.equal(f.nodes.get('azure-prerequisite-banner').hidden, true);
+  }
+  const unknown = await frontendFixture();
+  await unknown.ui.poll();
+  assert.equal(unknown.ui.status().reason, 'registration-unavailable');
+  assert.match(unknown.nodes.get('azure-prerequisite-message').textContent, /registration status is unavailable/);
+  assert.equal(unknown.nodes.get('azure-prerequisite-add').hidden, true);
+});
+
+test('newer inventory first-add and last-remove changes win over an in-flight registration status request', async () => {
+  for (const adding of [false, true]) {
+    let finish;
+    const f = await frontendFixture(() => new Promise(resolve => { finish = resolve; }));
+    f.context.servers = adding ? [] : [azure()];
+    f.ui.fromInventory();
+    const request = f.ui.poll();
+    f.context.servers = adding ? [azure()] : [];
+    f.ui.fromInventory();
+    finish({ ok: true, json: async () => ({ eligible: !adding,
+      reason: adding ? 'registration-required' : 'ready', registeredCount: adding ? 0 : 1 }) });
+    await request;
+    assert.equal(f.ui.status().eligible, adding);
+    assert.equal(f.nodes.get('azure-prerequisite-banner').hidden, adding);
+  }
+});
+
+test('authoritative status detects external registration removal and explicit unreadable registry safely', async () => {
+  let status = { eligible: false, reason: 'registration-required', registeredCount: 0, servers: [] };
+  const f = await frontendFixture(async () => ({ ok: true, json: async () => status }));
+  f.context.servers = [azure()];
+  f.ui.fromInventory();
+  await f.ui.poll();
+  assert.equal(f.ui.status().eligible, false);
+  assert.equal(f.nodes.get('azure-prerequisite-add').hidden, false);
+  status = { eligible: false, reason: 'registration-unavailable', registeredCount: null, servers: [] };
+  await f.ui.poll();
+  assert.equal(f.nodes.get('azure-prerequisite-add').hidden, true);
+  assert.match(f.nodes.get('azure-prerequisite-message').textContent, /unavailable/);
 });
 
 test('scheduler manual force and queued jobs cannot bypass prerequisite or send outage hooks', async () => {

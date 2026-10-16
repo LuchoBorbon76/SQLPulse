@@ -53,42 +53,54 @@ const deferred = () => {
 };
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
-test('registered Azure readiness uses mocked SELECT 1, recovers independently and gates every live SQL pipeline', async t => {
-  let readiness, reachable = true, time = Date.now();
+test('saved paused/unreachable MI immediately unlocks live SQL; authentication failures remain per-server without prerequisite SQL', async t => {
+  let readiness;
   const fixture = await serverFixture(t, {
     createAzurePrerequisite: options => {
-      readiness = createAzurePrerequisite({ ...options, now: () => time,
-        probe: (...args) => reachable ? options.probe(...args) : Promise.reject(new Error('Fixture authorization failure')) });
+      assert.equal('probe' in options, false);
+      readiness = createAzurePrerequisite(options);
       return readiness;
     },
+    azureSqlAuth: { withSession: (value, operation) => {
+      if (value.id === 'mi') throw Object.assign(new Error('Azure CLI account does not match the configured user'), { code: 'AZ_IDENTITY' });
+      return operation({});
+    } },
   });
   t.after(async () => { readiness.stop(); await readiness.idle(); });
   await fixture.updateServers(list => {
     list.push(cfg({ server: 'fixture.invalid', engineEdition: 3 }));
-    list.push(cfg({ id: 'mi', server: 'custom-mi.invalid', connectionType: 'azure-mi', engineEdition: 8, monitoringPaused: true }));
   });
   assert.equal((await fixture.request('/api/metrics?serverId=one', 'GET')).status, 409);
+  await assert.rejects(fixture.runSqlcmdOutput(cfg(), 'SELECT 1;', 'detail', [], 100),
+    error => error.azureRequired && error.status === 409);
+  await fixture.updateServers(list => {
+    list.push(cfg({ id: 'mi', server: 'custom-mi.invalid', connectionType: 'azure-mi', engineEdition: 8, monitoringPaused: true }));
+  });
+  assert.equal(readiness.status().eligible, true);
+  const status = await fixture.request('/api/azure-readiness', 'GET');
+  assert.equal(status.data.reason, 'ready');
+  assert.equal(status.data.registeredCount, 1);
+  assert.equal(status.data.servers[0].state, 'registered');
+  assert.equal(fixture.calls.length, 0);
   readiness.start(); await readiness.idle(); await tick();
   assert.equal(readiness.status().eligible, true);
-  const calls = fixture.calls.filter(call => call.sql === 'SET NOCOUNT ON; SELECT 1;');
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].args[calls[0].args.indexOf('-l') + 1], '30');
-  assert.ok(fixture.calls.some(call => call.options?.allowLogin === false));
+  assert.equal(fixture.calls.length, 0);
   assert.equal((await fixture.request('/api/metrics?serverId=one', 'GET')).status, 200);
   const registered = (await fixture.loadServers()).find(server => server.id === 'mi');
   assert.equal(registered.monitoringPaused, true);
-  reachable = false; time += 60000;
-  await readiness.tick(); await readiness.idle(); await tick();
-  assert.equal(readiness.status().eligible, false);
-  await assert.rejects(fixture.runSqlcmdOutput(cfg(), 'SELECT 1;', 'detail', [], 100),
-    error => error.azureRequired && error.status === 409);
-  assert.equal((await fixture.request('/api/metrics?serverId=one', 'GET')).status, 409);
-  reachable = true; time += 60000;
+  const generation = readiness.status().generation;
+  await assert.rejects(fixture.runSqlcmdOutput(registered, 'SELECT per_server_detail;', 'detail', [], 100),
+    error => error.code === 'AZ_IDENTITY' && !error.azureRequired);
   await readiness.tick(); await readiness.idle(); await tick();
   assert.equal(readiness.status().eligible, true);
+  assert.equal(readiness.status().generation, generation);
+  assert.equal((await fixture.request('/api/metrics?serverId=one', 'GET')).status, 200);
+  assert.equal((await fixture.request('/api/servers/one/counters/test', 'POST', { sql: 'SELECT 7' })).status, 200);
+  assert.equal(fixture.calls.some(call => call.sql === 'SET NOCOUNT ON; SELECT 1;'), false);
   await fixture.updateServers(list => list.filter(server => server.id !== 'mi'));
   assert.equal(readiness.status().reason, 'registration-required');
   assert.equal((await fixture.request('/api/overview?refresh=1', 'GET')).status, 409);
+  await readiness.idle();
 });
 function section(start, end) {
   const first = source.indexOf(start), last = source.indexOf(end, first + start.length);

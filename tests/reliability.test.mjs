@@ -512,7 +512,7 @@ test('SQL subprocess executions use unique files and promptly clean success and 
   const paths = [];
   const context = {
     TMP_DIR: directory, mkdtemp, path, writeFile, readFile, rm,
-    prerequisiteExemptTags: new Set(['test', 'engine', 'dblist', 'readiness']),
+    prerequisiteExemptTags: new Set(['test', 'engine', 'dblist']),
     requireAzurePrerequisite: async () => 1,
     shutdownController: new AbortController(), AbortSignal,
     sqlProcessLimiter: createAsyncLimiter(2),

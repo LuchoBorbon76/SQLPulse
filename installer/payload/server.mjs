@@ -551,21 +551,15 @@ SELECT JSON_QUERY(@topq) AS top_queries FOR JSON PATH, WITHOUT_ARRAY_WRAPPER;
 // ---------- Collector ----------
 const sqlProcessLimiter = createAsyncLimiter(2);
 const sectionCollector = createSectionCache();
-const prerequisiteExemptTags = new Set(['test', 'engine', 'dblist', 'readiness']);
+const prerequisiteExemptTags = new Set(['test', 'engine', 'dblist']);
 const azurePrerequisite = createAzurePrerequisite({
   getServers: loadServers,
-  probe: async (stored, { signal }) => {
-    const cfg = await resolveServer(stored);
-    const raw = await runSqlcmdOutput(cfg, 'SET NOCOUNT ON; SELECT 1;', 'readiness',
-      ['-l', '30', '-t', '10', '-h', '-1', '-W'], 45000, { signal, allowLogin: false });
-    return raw.trim() === '1';
-  },
   onChange: () => shutdownController.signal.aborted ? undefined : configureMonitoring(),
 });
 async function requireAzurePrerequisite(expectedGeneration) {
   const status = azurePrerequisite.reconcile(await loadServers());
   if (!status.eligible || (expectedGeneration !== undefined && expectedGeneration !== status.generation)) {
-    throw Object.assign(requestError(409, 'Live monitoring requires a registered, recently reachable Azure SQL Database or Managed Instance. Review Azure connectivity.'), {
+    throw Object.assign(requestError(409, 'Live monitoring requires a registered Azure SQL Database or Managed Instance. Register an Azure SQL connection.'), {
       azureRequired: true, azureReadiness: status,
     });
   }
@@ -1178,7 +1172,6 @@ const server = http.createServer(async (req, res) => {
 
     if ((p === '/api/azure-readiness' || p === '/api/registration/status') && req.method === 'GET') {
       const status = azurePrerequisite.reconcile(await loadServers());
-      void azurePrerequisite.tick();
       return json(res, 200, status);
     }
     if (['/api/query-detail', '/api/live-plan', '/api/kill-session', '/api/diagnostics/collect'].includes(p) ||
@@ -1813,6 +1806,7 @@ async function operationsStatus() {
 server.listen(PORT, '127.0.0.1', async () => {
   console.log(`SQL Pulse listening on http://127.0.0.1:${server.address().port}`);
   azurePrerequisite.start();
+  await azurePrerequisite.idle();
   try {
     const settings = await emailAlerts.settings();
     emailMonitoringEnabled = settings.enabled;

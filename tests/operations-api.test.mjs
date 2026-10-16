@@ -126,3 +126,33 @@ test('SQL Server-only host gates live APIs while inventory, connection validatio
   assert.equal(health.monitor.failed, 0);
   assert.equal((await (await f.get('/api/alerts/history')).json()).entries.length, 0);
 });
+
+test('registration APIs count a paused unreachable MI without SQL or sign-in, and last removal restores the gate', { timeout: 30000 }, async t => {
+  const f = await host(t);
+  await f.get('/api/servers');
+  const registry = [
+    { id: 'local', name: 'Local fixture', server: 'local.invalid', auth: 'windows', engineEdition: 3, monitoringPaused: true },
+    { id: 'existing-mi', name: 'Saved MI', server: 'offline.invalid', auth: 'azuread-interactive',
+      user: 'wrong-account@example.test', connectionType: 'azure-mi', engineEdition: 8, monitoringPaused: true },
+  ];
+  await writeFile(path.join(f.dataDir, 'servers.json'), JSON.stringify(registry));
+  for (const route of ['/api/azure-readiness', '/api/registration/status']) {
+    const response = await f.get(route);
+    assert.equal(response.status, 200);
+    const status = await response.json();
+    assert.equal(status.eligible, true);
+    assert.equal(status.reason, 'ready');
+    assert.equal(status.registeredCount, 1);
+    assert.deepEqual(status.servers, [{ id: 'existing-mi', state: 'registered' }]);
+    assert.equal('reachableCount' in status, false);
+    assert.doesNotMatch(JSON.stringify(status), /wrong-account|offline/);
+  }
+  assert.equal((await (await f.get('/api/servers')).json()).find(server => server.id === 'existing-mi').monitoringPaused, true);
+  assert.equal((await (await f.get('/health/details')).json()).sqlProcesses.active, 0);
+  const removed = await fetch(f.url + '/api/servers/existing-mi', { method: 'DELETE' });
+  assert.equal(removed.status, 200);
+  assert.equal((await (await f.get('/api/azure-readiness')).json()).reason, 'registration-required');
+  assert.equal((await f.get('/api/overview?refresh=1')).status, 409);
+  await writeFile(path.join(f.dataDir, 'servers.json'), '{corrupt');
+  assert.equal((await f.get('/api/azure-readiness')).status, 500);
+});

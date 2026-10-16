@@ -122,7 +122,7 @@ export function sqlExecutionBudget(cfg, extraArgs, timeoutMs) {
   return { args, timeoutMs: Math.max(timeoutMs, (login + (Number.isFinite(query) ? query : 30) + 5) * 1000) };
 }
 
-const RETRYABLE_READS = new Set(['metrics', 'metrics-azure', 'inventory', 'topq', 'test', 'engine', 'dblist', 'detail', 'plan', 'readiness']);
+const RETRYABLE_READS = new Set(['metrics', 'metrics-azure', 'inventory', 'topq', 'test', 'engine', 'dblist', 'detail', 'plan']);
 export async function runSqlReadWithRetry(cfg, tag, operation, {
   signal, onProgress, onRetry = () => {}, wait = delay,
 } = {}) {

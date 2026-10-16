@@ -208,6 +208,7 @@ tr:hover td{background:var(--cp-surface-soft);}
 :root{--cp-button-height:30px;--cp-button-radius:8px;}
 .btn{box-sizing:border-box;min-height:var(--cp-button-height);background:var(--cp-accent);color:var(--cp-accent-fg);border:1px solid transparent;padding:5px 10px;border-radius:var(--cp-button-radius);font-family:inherit;font-size:11px;line-height:1.25;font-weight:600;cursor:pointer;transition:background 0.15s,border-color 0.15s;}
 button.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;vertical-align:middle;}
+#azure-prerequisite-banner[hidden],#azure-prerequisite-add[hidden]{display:none;}
 .btn:hover:not(:disabled){background:var(--cp-accent-hover);}
 .btn.ghost{background:var(--cp-surface);color:var(--cp-text-muted);border:1px solid var(--cp-border);}
 .btn.ghost:hover:not(:disabled){background:var(--cp-surface-soft);border-color:var(--cp-border-strong);}
@@ -355,9 +356,9 @@ tr.clickable:hover td:first-child{border-left:3px solid var(--cp-accent);padding
 </head>
 <body>
 <div id="azure-prerequisite-banner" role="status" style="position:sticky;top:0;z-index:100;background:#533f12;color:#fff;padding:12px;text-align:center">
-  <span id="azure-prerequisite-message">Checking Azure SQL connectivity. Live monitoring is locked until a registered Azure SQL Database or Managed Instance is recently reachable.</span>
-  <button type="button" id="azure-prerequisite-add" class="btn">Add Azure connection</button>
-  <button type="button" id="azure-prerequisite-check" class="btn">Check again</button>
+  <span id="azure-prerequisite-message">Checking saved Azure SQL registrations…</span>
+  <button type="button" id="azure-prerequisite-add" class="btn" hidden>Add Azure connection</button>
+  <button type="button" id="azure-prerequisite-check" class="btn">Recheck registrations</button>
 </div>
 <div class="layout">
   <aside class="sidebar">
@@ -759,37 +760,50 @@ let dashboardView = 'overview';
 let dashboardStarted = false;
 let azureReadiness = { eligible: false, reason: 'checking' };
 let readinessRequest;
+let registrationRevision = 0;
+function applyAzureReadiness(status){
+  const wasEligible = azureReadiness.eligible;
+  azureReadiness = status;
+  registrationRevision++;
+  el('azure-prerequisite-banner').hidden = azureReadiness.eligible === true;
+  const reasons = {
+    'registration-required': 'Register at least one Azure SQL Database or Managed Instance to enable live monitoring. SQL Server connections can still be added and tested.',
+    checking: 'Checking saved Azure SQL registrations…',
+    'registration-unavailable': 'Azure registration status is unavailable. Check the local dashboard connection; saved registrations have not been changed.',
+  };
+  el('azure-prerequisite-message').textContent = reasons[azureReadiness.reason] || reasons['registration-unavailable'];
+  el('azure-prerequisite-add').hidden = azureReadiness.reason !== 'registration-required';
+  if (!azureReadiness.eligible) {
+    fleetUI?.stop();
+    cancelDetailRequests();
+    setStatus('paused', azureReadiness.reason === 'registration-required'
+      ? 'Azure registration required · live monitoring locked' : 'Azure registration status unavailable');
+  }
+  updateDetailActions();
+  updatePauseControls();
+  if (!wasEligible && azureReadiness.eligible && dashboardStarted && !historyController?.isHistorical() && !currentViewPaused()) refreshCurrentView();
+}
+function applyServerRegistrations(){
+  const registered = servers.filter(server => classifySqlEndpoint(server.server, server.connectionType || 'auto', server.engineEdition).isAzure);
+  applyAzureReadiness({ eligible: registered.length > 0,
+    reason: registered.length ? 'ready' : 'registration-required', registeredCount: registered.length,
+    servers: registered.map(server => ({ id: server.id, state: 'registered' })) });
+}
 async function pollAzureReadiness(){
   if (readinessRequest) return readinessRequest;
   readinessRequest = (async () => {
-    const wasEligible = azureReadiness.eligible;
+    const revision = registrationRevision;
     try {
       const response = await fetch('/api/azure-readiness', { cache: 'no-store', signal: AbortSignal.timeout(10000) });
-      if (!response.ok) throw new Error('Readiness unavailable');
-      azureReadiness = await response.json();
-    } catch { azureReadiness = { eligible: false, reason: 'unknown' }; }
-    el('azure-prerequisite-banner').hidden = azureReadiness.eligible === true;
-    const reasons = {
-      'registration-required': 'Register at least one Azure SQL Database or Managed Instance to enable live monitoring. SQL Server connections can still be added and tested.',
-      checking: 'Checking registered Azure SQL connectivity. Live monitoring remains locked until a recent connection check succeeds.',
-    };
-    const registered = azureReadiness.registeredCount > 0;
-    const failed = azureReadiness.servers?.find(server => server.state === 'unreachable' && server.guidance);
-    const saved = servers.find(server => server.id === failed?.id);
-    el('azure-prerequisite-message').textContent = failed
-      ? `Your Azure SQL connection${saved?.name ? ' "'+saved.name+'"' : ''} is already registered. ${failed.guidance} Live monitoring is locked until a connection check succeeds. Do not add a duplicate connection.`
-      : reasons[azureReadiness.reason] || (registered
-        ? 'An Azure SQL connection is already registered, but no recent successful check is available. Review the existing connection; automatic checks continue. Live monitoring remains locked.'
-        : 'Azure connectivity status is unavailable. Check the local dashboard connection; registration has not been verified.');
-    el('azure-prerequisite-add').textContent = registered ? 'Review existing connection' : 'Add Azure connection';
-    if (!azureReadiness.eligible) {
-      fleetUI?.stop();
-      cancelDetailRequests();
-      setStatus('paused', 'Azure connectivity prerequisite · live monitoring locked');
+      if (!response.ok) throw new Error('Registration status unavailable');
+      const status = await response.json();
+      if (typeof status.eligible !== 'boolean' || !['ready', 'registration-required', 'registration-unavailable'].includes(status.reason)) {
+        throw new Error('Invalid registration status');
+      }
+      if (revision === registrationRevision) applyAzureReadiness(status);
+    } catch {
+      if (revision === registrationRevision) applyAzureReadiness({ ...azureReadiness, reason: 'registration-unavailable' });
     }
-    updateDetailActions();
-    updatePauseControls();
-    if (!wasEligible && azureReadiness.eligible && dashboardStarted && !historyController?.isHistorical() && !currentViewPaused()) refreshCurrentView();
   })().finally(() => { readinessRequest = null; });
   return readinessRequest;
 }
@@ -855,9 +869,6 @@ function invalidateClientMetrics(id){
 
 const el = (id) => document.getElementById(id);
 el('azure-prerequisite-add').addEventListener('click', () => {
-  const candidate = azureReadiness.servers?.find(server => server.state === 'unreachable') || azureReadiness.servers?.[0];
-  const existing = servers.find(server => server.id === candidate?.id);
-  if (existing) { openModal(existing); return; }
   el('add-server-btn').click();
   el('f-target-type').value = 'azure-sqldb';
   el('f-target-type').dispatchEvent(new Event('change'));
@@ -1760,6 +1771,7 @@ async function loadServers(){
   try {
     const list = await registryRequest('/api/servers');
     if (!Array.isArray(list)) throw new Error('Invalid server registry response');
+    await sqlEndpointReady;
     for (const previous of servers) {
       const current = list.find(s => s.id === previous.id);
       const withoutPause = value => { const { monitoringPaused, ...rest } = value; return rest; };
@@ -1770,6 +1782,7 @@ async function loadServers(){
       const cached = fleetUI.getServer(server.id);
       return cached?.server === server.server ? { ...cached, ...server } : { ...server, status:'loading', metrics:{}, sampledAt:null };
     }));
+    applyServerRegistrations();
     renderServerList();
     updatePauseControls();
     return list;
@@ -1891,6 +1904,7 @@ function renderServerList(){
             await registryRequest('/api/servers/'+encodeURIComponent(id), {method:'DELETE'});
             invalidateClientMetrics(id);
             servers = servers.filter(s => s.id !== id);
+            applyServerRegistrations();
             if(id === activeServerId){
               activeServerId = servers[0]?.id || null;
               if(dashboardView === 'detail' && activeServerId) setActiveServer(activeServerId);

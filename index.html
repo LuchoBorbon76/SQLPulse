@@ -773,8 +773,15 @@ async function pollAzureReadiness(){
       'registration-required': 'Register at least one Azure SQL Database or Managed Instance to enable live monitoring. SQL Server connections can still be added and tested.',
       checking: 'Checking registered Azure SQL connectivity. Live monitoring remains locked until a recent connection check succeeds.',
     };
-    el('azure-prerequisite-message').textContent = reasons[azureReadiness.reason] ||
-      'No registered Azure SQL connection has a recent successful check. Live monitoring is locked. Check authorization, VPN, network and SQL access; this does not prove an Azure service outage. Automatic checks continue.';
+    const registered = azureReadiness.registeredCount > 0;
+    const failed = azureReadiness.servers?.find(server => server.state === 'unreachable' && server.guidance);
+    const saved = servers.find(server => server.id === failed?.id);
+    el('azure-prerequisite-message').textContent = failed
+      ? `Your Azure SQL connection${saved?.name ? ' "'+saved.name+'"' : ''} is already registered. ${failed.guidance} Live monitoring is locked until a connection check succeeds. Do not add a duplicate connection.`
+      : reasons[azureReadiness.reason] || (registered
+        ? 'An Azure SQL connection is already registered, but no recent successful check is available. Review the existing connection; automatic checks continue. Live monitoring remains locked.'
+        : 'Azure connectivity status is unavailable. Check the local dashboard connection; registration has not been verified.');
+    el('azure-prerequisite-add').textContent = registered ? 'Review existing connection' : 'Add Azure connection';
     if (!azureReadiness.eligible) {
       fleetUI?.stop();
       cancelDetailRequests();
@@ -848,6 +855,9 @@ function invalidateClientMetrics(id){
 
 const el = (id) => document.getElementById(id);
 el('azure-prerequisite-add').addEventListener('click', () => {
+  const candidate = azureReadiness.servers?.find(server => server.state === 'unreachable') || azureReadiness.servers?.[0];
+  const existing = servers.find(server => server.id === candidate?.id);
+  if (existing) { openModal(existing); return; }
   el('add-server-btn').click();
   el('f-target-type').value = 'azure-sqldb';
   el('f-target-type').dispatchEvent(new Event('change'));

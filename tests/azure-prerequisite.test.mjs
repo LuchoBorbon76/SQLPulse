@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { readFile } from 'node:fs/promises';
-import { createAzurePrerequisite, isRegisteredAzure } from '../azure-prerequisite.mjs';
+import { createAzurePrerequisite, isRegisteredAzure, azureReadinessFailure } from '../azure-prerequisite.mjs';
 import { createMonitorScheduler } from '../monitor-scheduler.mjs';
 import { createCollectorCache, configIdentity, connectionIdentity } from '../collector-cache.mjs';
 
@@ -29,6 +29,40 @@ test('registration uses shared classifier, engine precedence and explicit custom
   assert.equal(isRegisteredAzure(azure('known', { server: 'custom', engineEdition: 8 })), true);
   assert.equal(isRegisteredAzure(azure('wrong', { engineEdition: 3 })), false);
   assert.equal(isRegisteredAzure(azure('local', { server: 'onprem' })), false);
+});
+
+test('registered MI account mismatch is actionable and public status never includes raw diagnostics or secrets', async () => {
+  const f = fixture([azure('existing-mi', { connectionType: 'azure-mi', engineEdition: 8 })], async () => {
+    throw new Error('Azure CLI account does not match the configured user. PRIVATE_TOKEN PRIVATE_USER');
+  });
+  await f.start();
+  const status = f.service.status();
+  assert.equal(status.registeredCount, 1);
+  assert.equal(status.reason, 'connectivity-required');
+  assert.equal(status.eligible, false);
+  assert.equal(status.servers[0].failure, 'account-mismatch');
+  assert.match(status.servers[0].guidance, /Sign in again/);
+  assert.doesNotMatch(JSON.stringify(status), /PRIVATE_TOKEN|PRIVATE_USER/);
+  f.service.stop();
+  for (const [message, failure] of [
+    ['AADSTS50076: MFA required private', 'sign-in-required'],
+    ['SQL token expired private', 'sign-in-required'],
+    ['Login failed for user private', 'sql-access'],
+    ['dial tcp timed out private', 'timeout'],
+    ['unexpected EOF private', 'connectivity'],
+  ]) {
+    const result = azureReadinessFailure(new Error(message));
+    assert.equal(result.failure, failure);
+    assert.doesNotMatch(result.guidance, /private/);
+  }
+});
+
+test('banner reviews existing registered Azure connections rather than suggesting duplicate registration', async () => {
+  const source = await readFile(new URL('../index.html', import.meta.url), 'utf8');
+  assert.match(source, /already registered/);
+  assert.match(source, /Do not add a duplicate connection/);
+  assert.match(source, /registered \? 'Review existing connection' : 'Add Azure connection'/);
+  assert.match(source, /if \(existing\) \{ openModal\(existing\); return; \}/);
 });
 
 test('empty and SQL Server-only inventories stay locked and do not probe', async () => {

@@ -5,6 +5,23 @@ export function isRegisteredAzure(server) {
   return classifySqlEndpoint(server.server, server.connectionType || 'auto', server.engineEdition).isAzure;
 }
 
+export function azureReadinessFailure(error) {
+  const message = String(error?.message || '');
+  if (error?.code === 'AZ_IDENTITY' || /account does not match|different (?:default )?tenant|different tenant/i.test(message)) {
+    return { failure: 'account-mismatch', guidance: 'The active Azure CLI account or tenant does not match this saved connection. Open Edit, select Sign in again, and Test & Update with the intended account.' };
+  }
+  if (error?.category === 'authentication' || /AZ_SESSION|AADSTS|sign in|sign-in|az login|token.*expired|interaction_required/i.test(message)) {
+    return { failure: 'sign-in-required', guidance: 'Microsoft sign-in needs attention. Open Edit and use Sign in again, then Test & Update. Automatic checks never open a sign-in browser.' };
+  }
+  if (error?.category === 'authorization-or-configuration' || /login failed|permission.*denied|not authorized|certificate|x509/i.test(message)) {
+    return { failure: 'sql-access', guidance: 'The saved connection could not authenticate to SQL or validate its configuration. Review SQL permissions, database and certificate settings using Test & Update.' };
+  }
+  if (error?.name === 'AbortError' || error?.category === 'timeout' || /timed out|timeout/i.test(message)) {
+    return { failure: 'timeout', guidance: 'The connection check timed out. Review the saved endpoint and client network route, then test the existing connection.' };
+  }
+  return { failure: 'connectivity', guidance: 'The saved connection check failed. Review network access, authorization and SQL access using the existing connection. This does not prove an Azure service outage.' };
+}
+
 // Evidence is bound to credentials as well as the endpoint, but never exposed.
 function fingerprint(server) {
   return createHash('sha256').update(JSON.stringify([
@@ -43,6 +60,7 @@ export function createAzurePrerequisite({
         const fresh = item && now() - item.checkedAt >= 0 && now() - item.checkedAt < freshnessMs;
         return { id: server.id, state: !item ? 'checking' : !fresh ? 'stale' : item.ok ? 'reachable' : 'unreachable',
           checkedAt: item ? new Date(item.checkedAt).toISOString() : null,
+          ...(!item?.ok && item?.failure ? { failure: item.failure, guidance: item.guidance } : {}),
           checking: pending.has(server.id) };
       }) };
   }
@@ -60,9 +78,9 @@ export function createAzurePrerequisite({
     const timeout = setTimer(() => controller.abort(), timeoutMs);
     timeout?.unref?.();
     job.promise = (async () => {
-      let ok = false;
+      let ok = false, failure = azureReadinessFailure();
       try { ok = await probe({ ...server }, { signal: controller.signal }) === true; }
-      catch { /* Authentication and network failures are connectivity failures, not outage alerts. */ }
+      catch (error) { failure = azureReadinessFailure(error); }
       finally { clearTimer(timeout); }
       const checkedAt = now();
       if (stopped) return;
@@ -70,9 +88,9 @@ export function createAzurePrerequisite({
       if (stopped) return;
       const current = registered.find(item => item.id === server.id);
       if (current && fingerprint(current) === identity && !controller.signal.aborted) {
-        evidence.set(server.id, { identity, checkedAt, ok });
+        evidence.set(server.id, { identity, checkedAt, ok, ...(!ok ? failure : {}) });
       } else if (current && fingerprint(current) === identity) {
-        evidence.set(server.id, { identity, checkedAt, ok: false });
+        evidence.set(server.id, { identity, checkedAt, ok: false, ...azureReadinessFailure({ name: 'AbortError' }) });
       }
       status();
     })().catch(() => {

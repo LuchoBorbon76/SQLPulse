@@ -1164,7 +1164,11 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (p === '/' || p === '/index.html') {
-      const html = await readFile(HTML, 'utf8');
+      const { version } = JSON.parse(await readFile(path.join(__dirname, 'package.json'), 'utf8'));
+      if (typeof version !== 'string' || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(version)) {
+        throw new Error('Application package version is invalid.');
+      }
+      const html = (await readFile(HTML, 'utf8')).replaceAll('{{SQL_PULSE_VERSION}}', version);
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(html);
       return;

@@ -253,10 +253,16 @@ Set-Content -LiteralPath (Join-Path $InstallDir 'history\\one.json') -Value 'pri
 $null = New-Item -ItemType Directory -Path (Join-Path $InstallDir 'history-series')
 Set-Content -LiteralPath (Join-Path $InstallDir 'history-series\\.settings.json') -Value 'private retention settings'
 Set-Content -LiteralPath (Join-Path $InstallDir 'history-series\\one.json') -Value 'private history series'
+$profile = Join-Path $InstallDir 'azure-sql-auth\\fixture-profile'
+$null = New-Item -ItemType Directory -Path $profile -Force
+Set-Content -LiteralPath (Join-Path $profile 'fixture-cache.bin') -Value 'private CLI cache fixture'
 Assert-SafePayload $payload
 Set-Content -LiteralPath (Join-Path $payload '.encryption-key') -Value 'must never ship'
 Assert-Throws { Assert-SafePayload $payload } 'Unsafe installer payload'
 Remove-Item -LiteralPath (Join-Path $payload '.encryption-key')
+$null = New-Item -ItemType Directory -Path (Join-Path $payload 'azure-sql-auth')
+Assert-Throws { Assert-SafePayload $payload } 'Unsafe installer payload'
+Remove-Item -LiteralPath (Join-Path $payload 'azure-sql-auth')
 $SkipPrereqs = $true
 $NoShortcuts = $true
 $NoAutostart = $true
@@ -296,7 +302,8 @@ Assert (-not (Test-Path -LiteralPath (Join-Path $oldModules 'old.txt'))) 'Stale 
 $backups = @(Get-ChildItem -LiteralPath (Join-Path $InstallDir 'config-backups') -Directory)
 Assert ($backups.Count -eq 1) 'Expected one grouped backup'
 foreach ($file in @('servers.json', 'ai-settings.json', 'alert-settings.json', 'alert-state.json', 'microsoft-email-auth.json', '.encryption-key',
-    'monitor-settings.json', 'incident-evidence.json', 'history\\one.json', 'history-series\\.settings.json', 'history-series\\one.json')) {
+    'monitor-settings.json', 'incident-evidence.json', 'history\\one.json', 'history-series\\.settings.json', 'history-series\\one.json',
+    'azure-sql-auth\\fixture-profile\\fixture-cache.bin')) {
     $original = Get-Content -LiteralPath (Join-Path $InstallDir $file) -Raw
     $backup = Get-Content -LiteralPath (Join-Path $backups[0].FullName $file) -Raw
     Assert ($original -eq $backup -and $original -match '^private') "Runtime state not preserved/backed up: $file"

@@ -207,7 +207,7 @@ async function resolveServer(s) {
   return clone;
 }
 
-const azureSqlAuth = createAzureSqlAuth();
+const azureSqlAuth = createAzureSqlAuth({ authDirectory: path.join(DATA_DIR, 'azure-sql-auth') });
 const connectionProgress = createConnectionProgress();
 function pickSqlcmd() { return GO_SQLCMD; }
 
@@ -600,7 +600,7 @@ async function runSqlcmdAttempt(cfg, sql, tag, extraArgs, timeoutMs, options = {
         const aborted = () => { child?.kill?.(); };
         child = execFile(pickSqlcmd(cfg), args, {
           timeout: budget.timeoutMs, windowsHide: true, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024,
-          env: sqlcmdEnvironment(cfg, process.env, session.tenant || cfg.tenant),
+          env: sqlcmdEnvironment(cfg, process.env, session.tenant || cfg.tenant, session.azureConfigDir),
         }, (error, stdout, stderr) => {
           Promise.resolve().then(() => {
             options.signal?.removeEventListener('abort', aborted);
@@ -625,8 +625,8 @@ async function runSqlcmdAttempt(cfg, sql, tag, extraArgs, timeoutMs, options = {
 }
 
 // Run a sqlcmd script, return parsed JSON (or throw).
-// For Entra Interactive auth, acquires an access token once (cached) so the
-// browser prompt only appears the first time — not on every collection.
+// Entra Interactive verifies and reuses its persistent app-owned CLI profile.
+// Only explicit Test/Load operations may start browser/device sign-in.
 async function runSqlcmdJson(cfg, sql, tag, timeoutSec, options = {}) {
   const raw = await runSqlcmdOutput(cfg, sql, tag, [
     '-l', '10', '-t', String(timeoutSec),

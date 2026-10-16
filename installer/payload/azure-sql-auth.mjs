@@ -1,4 +1,7 @@
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { mkdir } from 'node:fs/promises';
+import path from 'node:path';
 import { normalizeTenant, redactSqlDiagnostic } from './sqlcmd-options.mjs';
 import { extractMicrosoftBrowserPrompt, extractMicrosoftDevicePrompt } from './microsoft-device-signin.js';
 import { cliBrowserCommand } from './cli-browser.mjs';
@@ -47,11 +50,13 @@ export function sqlTokenMatchesUser(claims, hint, account) {
 }
 
 export function createAzureSqlAuth({ execFileImpl = execFile, platform = process.platform, env = process.env, now = Date.now, promptTimeoutMs = 60000,
+  authDirectory,
   resolveCli = execFileImpl === execFile && platform === 'win32' ? () => resolveToolPath('az', { env }) : () => undefined,
 } = {}) {
   let queue = Promise.resolve();
   let cleanupBlocked = false;
   let cliResolved = false, verifiedCliPath;
+  const profiles = new Map();
   const cliEnv = { ...env };
   for (const key of Object.keys(cliEnv)) {
     if (/^AZURE_CORE_(?:ENABLE_BROKER_ON_WINDOWS|LOGIN_EXPERIENCE_V2)$/i.test(key)) delete cliEnv[key];
@@ -62,7 +67,7 @@ export function createAzureSqlAuth({ execFileImpl = execFile, platform = process
   // The explicit config tenant (or current CLI tenant) wins over ambient defaults.
   for (const key of Object.keys(cliEnv)) if (/^AZURE_TENANT_ID$/i.test(key)) delete cliEnv[key];
 
-  async function stopCliDescendants(processId, includeRoot = false) {
+  async function stopCliDescendants(processId, includeRoot = false, operationEnv = cliEnv) {
     if (!Number.isSafeInteger(processId) || processId <= 0) throw new Error('Azure CLI process ID is unavailable for cleanup');
     const script = `$ErrorActionPreference = 'Stop'; ` +
       `$all = @(Get-CimInstance Win32_Process); $ids = @(${processId}); $children = @(); ` +
@@ -82,12 +87,12 @@ export function createAzureSqlAuth({ execFileImpl = execFile, platform = process
       `if ($remaining -and $remaining.CreationDate -eq $p.CreationDate) { throw 'Azure CLI child process did not stop' } } }`;
     await new Promise((resolve, reject) => {
       execFileImpl('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
-        env: cliEnv, timeout: 15000, windowsHide: true, encoding: 'utf8',
+        env: operationEnv, timeout: 15000, windowsHide: true, encoding: 'utf8',
       }, error => error ? reject(new Error('Azure CLI descendant cleanup failed')) : resolve());
     });
   }
 
-  function execute(args, { login = false, entraFlow = 'browser', signal, onProgress = () => {} } = {}) {
+  function execute(args, { login = false, entraFlow = 'browser', signal, onProgress = () => {}, env: operationEnv = cliEnv } = {}) {
     throwIfConnectionAborted(signal);
     if (cleanupBlocked) return Promise.reject(new Error('Azure CLI cleanup failed. Close the previous sign-in process before restarting SQL Pulse.'));
     if (!cliResolved) {
@@ -123,7 +128,7 @@ export function createAzureSqlAuth({ execFileImpl = execFile, platform = process
         // Capture descendants while cmd.exe is still alive; never terminate browsers.
         cleanup = Promise.resolve().then(async () => {
           try {
-            if (platform === 'win32' && child?.pid) await stopCliDescendants(child.pid, true);
+            if (platform === 'win32' && child?.pid) await stopCliDescendants(child.pid, true, operationEnv);
           } finally { child?.kill?.(); }
         }).catch(() => {
           cleanupBlocked = true;
@@ -168,7 +173,7 @@ export function createAzureSqlAuth({ execFileImpl = execFile, platform = process
       const stdoutChunk = chunk => publish('stdout', chunk);
       const stderrChunk = chunk => publish('stderr', chunk);
       child = execFileImpl(command.executable, command.args, {
-        env: login && !deviceFlow ? { ...cliEnv, BROWSER: cliBrowserCommand() } : cliEnv,
+        env: login && !deviceFlow ? { ...operationEnv, BROWSER: cliBrowserCommand() } : operationEnv,
         timeout: login ? 240000 : 15000, windowsHide: true, windowsVerbatimArguments: platform === 'win32',
         encoding: 'utf8', maxBuffer: 1024 * 1024,
       }, (error, stdout, stderr) => {
@@ -239,7 +244,9 @@ export function createAzureSqlAuth({ execFileImpl = execFile, platform = process
       if (!allowLogin) {
         throw new Error(`${error.message} ${cfg.auth === 'azuread-integrated'
           ? 'Entra Integrated requires an existing Azure CLI SQL session; choose Entra Interactive and use Test or Load to reconnect.'
-          : 'Monitoring will not open a sign-in browser; use Test or Load to reconnect.'}`);
+          : options.azureConfigDir
+            ? 'Sign in to the SQLPulse session via Test/Load. Monitoring will not open a sign-in browser.'
+            : 'Monitoring will not open a sign-in browser; use Test or Load to reconnect.'}`);
       }
     }
     throwIfConnectionAborted(options.signal);
@@ -255,6 +262,7 @@ export function createAzureSqlAuth({ execFileImpl = execFile, platform = process
   }
 
   function withSession(cfg, operation, { allowLogin = false, forceLogin = false, signal, onProgress } = {}) {
+    cfg = { ...cfg };
     const options = { signal, onProgress };
     if (!['azuread-interactive', 'azuread-integrated'].includes(cfg.auth)) return Promise.resolve().then(() => {
       throwIfConnectionAborted(signal);
@@ -262,14 +270,32 @@ export function createAzureSqlAuth({ execFileImpl = execFile, platform = process
     });
     onProgress?.({ phase: 'queued' });
     let started = false;
-    // Hold the global CLI lock until sqlcmd exits, not just until login completes.
+    // Hold the CLI lock until sqlcmd exits, not just until login completes.
     const work = queue.then(async () => {
       throwIfConnectionAborted(signal);
       started = true;
+      if (cfg.auth === 'azuread-interactive' && authDirectory !== undefined) {
+        // Scope persistence to the identity, never a temporary probe/server ID.
+        const identity = JSON.stringify([normalizeUser(cfg.user), normalizeTenant(cfg.tenant)]);
+        const azureConfigDir = path.join(authDirectory, createHash('sha256').update(identity).digest('hex'));
+        if (!profiles.has(azureConfigDir)) {
+          const ready = mkdir(azureConfigDir, { recursive: true, mode: 0o700 }).catch(error => {
+            profiles.delete(azureConfigDir);
+            throw error;
+          });
+          profiles.set(azureConfigDir, ready);
+        }
+        await profiles.get(azureConfigDir);
+        throwIfConnectionAborted(signal);
+        options.env = { ...cliEnv };
+        for (const key of Object.keys(options.env)) if (/^AZURE_CONFIG_DIR$/i.test(key)) delete options.env[key];
+        options.env.AZURE_CONFIG_DIR = azureConfigDir;
+        options.azureConfigDir = azureConfigDir;
+      }
       const interactive = allowLogin && cfg.auth === 'azuread-interactive';
       const session = await ensure(cfg, interactive, options, interactive && forceLogin);
       throwIfConnectionAborted(signal);
-      return operation(session);
+      return operation(options.azureConfigDir ? { ...session, azureConfigDir: options.azureConfigDir } : session);
     });
     queue = work.then(() => {}, () => {});
     if (!signal) return work;

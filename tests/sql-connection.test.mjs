@@ -1070,13 +1070,16 @@ test('registered connections receive browser URLs or explicit device codes befor
   }
 });
 
-test('running Windows CLI abort captures owned tree and holds queue until callback and cleanup finish', async () => {
+test('running Windows CLI abort uses its own profile for cleanup and holds the queue before another profile starts', async t => {
+  const authDirectory = await mkdtemp(path.join(root, '.sql-connection-'));
+  t.after(() => rm(authDirectory, { recursive: true, force: true }));
   const entered = deferred(), cleanupEntered = deferred(), controller = new AbortController();
-  let finishLogin, finishCleanup, cli = 0, sql = 0, killed = 0, settled = false;
+  let finishLogin, finishCleanup, loginEnv, cleanupEnv, cli = 0, sql = 0, killed = 0, settled = false;
   const auth = createAzureSqlAuth({
-    platform: 'win32', now: () => clock,
+    platform: 'win32', now: () => clock, authDirectory,
     execFileImpl: (executable, args, options, callback) => {
       if (executable === 'powershell.exe') {
+        cleanupEnv = options.env;
         assert.match(args.at(-1), /\$root/);
         assert.match(args.at(-1), /CreationDate -eq \$p.CreationDate/);
         assert.equal(args.at(-1).includes('Stop-Process -Name'), false);
@@ -1087,12 +1090,13 @@ test('running Windows CLI abort captures owned tree and holds queue until callba
       }
       cli++;
       if (args.at(-1).includes('az.cmd login')) {
+        loginEnv = options.env;
         finishLogin = callback;
         entered.resolve();
         return { pid: 999998, stdout: new EventEmitter(), stderr: new EventEmitter(), kill() { killed++; } };
       }
       if (cli === 1) callback(Object.assign(new Error('no session'), { code: 1 }), '', 'Please run az login.');
-      else callback(null, tokenResponse(), '');
+      else callback(null, tokenResponse({ upn: 'other@example.test' }), '');
     },
   });
   const connection = cfg({ auth: 'azuread-interactive' });
@@ -1101,7 +1105,12 @@ test('running Windows CLI abort captures owned tree and holds queue until callba
   await entered.promise;
   controller.abort();
   await cleanupEntered.promise;
-  const second = auth.withSession(connection, () => { sql++; });
+  assert.ok(loginEnv.AZURE_CONFIG_DIR.startsWith(authDirectory + path.sep));
+  assert.equal(cleanupEnv.AZURE_CONFIG_DIR, loginEnv.AZURE_CONFIG_DIR);
+  const second = auth.withSession({ ...connection, user: 'other@example.test' }, session => {
+    assert.notEqual(session.azureConfigDir, loginEnv.AZURE_CONFIG_DIR);
+    sql++;
+  });
   finishLogin(Object.assign(new Error('root stopped'), { killed: true }), '', 'accessToken=hidden');
   await tick();
   assert.equal(settled, false);
@@ -1112,6 +1121,197 @@ test('running Windows CLI abort captures owned tree and holds queue until callba
   assert.equal(killed, 1);
   assert.equal(sql, 1);
   assert.equal(cli, 3);
+});
+
+test('app-owned profiles persist across auth service restarts, servers, probes and normalized identities', async t => {
+  const authDirectory = await mkdtemp(path.join(root, '.sql-connection-'));
+  t.after(() => rm(authDirectory, { recursive: true, force: true }));
+  const env = { AZURE_CONFIG_DIR: 'external-cli-profile', Azure_Config_Dir: 'external-mixed-case', PATH: 'fixture-path' };
+  const original = { ...env }, calls = [];
+  let logins = 0;
+  const service = () => createAzureSqlAuth({
+    platform: 'linux', now: () => clock, authDirectory, env,
+    execFileImpl(executable, args, options, callback) {
+      calls.push({ args, env: options.env });
+      (async () => {
+        const marker = path.join(options.env.AZURE_CONFIG_DIR, 'fixture-account.json');
+        if (args[0] === 'login') {
+          logins++;
+          await writeFile(marker, JSON.stringify({ user: 'admin@example.test', tenant: tenantA }));
+          return callback(null, '', '');
+        }
+        try {
+          const account = JSON.parse(await readFile(marker, 'utf8'));
+          callback(null, tokenResponse({ upn: account.user, tid: account.tenant }), '');
+        } catch (error) { callback(Object.assign(error, { code: 1 }), '', 'Please run az login.'); }
+      })().catch(callback);
+    },
+  });
+  const connection = cfg({ auth: 'azuread-interactive', user: ' Admin@Example.Test ', tenant: tenantA.toUpperCase() });
+  let profile;
+  await service().withSession(connection, async session => {
+    profile = session.azureConfigDir;
+    assert.deepEqual(Object.keys(session).sort(), ['azureConfigDir', 'tenant']);
+    assert.equal(path.dirname(profile), authDirectory);
+    assert.match(path.basename(profile), /^[a-f0-9]{64}$/);
+    assert.equal(profile, path.join(authDirectory,
+      crypto.createHash('sha256').update(JSON.stringify(['admin@example.test', tenantA])).digest('hex')));
+    assert.equal(profile.includes('admin'), false);
+  }, { allowLogin: true });
+  assert.equal(logins, 1);
+  env.AZURE_CONFIG_DIR = 'another-app-changed-the-global-account';
+  for (const change of [
+    { id: undefined, server: 'db.database.windows.net', database: 'app', connectionType: 'azure-sqldb' },
+    { id: 'saved-new-id', server: 'mi.public.zone.database.windows.net,3342', connectionType: 'azure-mi' },
+    { id: 'engine-probe', engineEdition: 8, database: 'different' },
+    { id: 'dblist-probe', entraFlow: 'device-code' },
+  ]) {
+    await service().withSession({ ...connection, user: 'admin@example.test', ...change }, session => {
+      assert.equal(session.azureConfigDir, profile);
+    });
+  }
+  assert.equal(logins, 1, 'restart/Load/probe must reuse the persisted app session');
+  assert.ok(calls.every(call => call.env.AZURE_CONFIG_DIR === profile));
+  assert.ok(calls.every(call => !Object.hasOwn(call.env, 'Azure_Config_Dir')));
+  assert.deepEqual(await readdir(authDirectory), [path.basename(profile)]);
+  assert.equal(original.AZURE_CONFIG_DIR, 'external-cli-profile');
+  assert.equal(env.Azure_Config_Dir, original.Azure_Config_Dir);
+  assert.equal(env.PATH, original.PATH);
+});
+
+test('isolated profiles distinguish accounts and tenants without accepting configuration environment overrides', async t => {
+  const authDirectory = await mkdtemp(path.join(root, '.sql-connection-'));
+  t.after(() => rm(authDirectory, { recursive: true, force: true }));
+  const profiles = [];
+  let nextUser, nextTenant;
+  const auth = createAzureSqlAuth({
+    platform: 'linux', now: () => clock, authDirectory,
+    execFileImpl(executable, args, options, callback) {
+      callback(null, tokenResponse({ upn: nextUser, tid: nextTenant }), '');
+    },
+  });
+  for (const [user, tenant] of [
+    ['admin@example.test', tenantA], ['other@example.test', tenantA], ['admin@example.test', tenantB],
+    ['admin@example.test', 'resource.onmicrosoft.com'], ['admin@example.test', ''],
+  ]) {
+    nextUser = user;
+    nextTenant = tenant === tenantB ? tenantB : tenantA;
+    await auth.withSession(cfg({ auth: 'azuread-interactive', user, tenant, azureConfigDir: 'attacker-profile',
+      env: { AZURE_CONFIG_DIR: 'attacker-profile' } }), session => profiles.push(session.azureConfigDir));
+  }
+  assert.equal(new Set(profiles).size, profiles.length);
+  assert.ok(profiles.every(profile => path.dirname(profile) === authDirectory));
+  nextUser = 'admin@example.test';
+  nextTenant = tenantA;
+  await auth.withSession(cfg({ auth: 'azuread-interactive', user: ' ADMIN@EXAMPLE.TEST ', tenant: ' RESOURCE.ONMICROSOFT.COM ' }),
+    session => assert.equal(session.azureConfigDir, profiles[3]));
+});
+
+test('missing isolated session fails with Test/Load guidance and never uses a valid global login', async t => {
+  const authDirectory = await mkdtemp(path.join(root, '.sql-connection-'));
+  t.after(() => rm(authDirectory, { recursive: true, force: true }));
+  const env = { AZURE_CONFIG_DIR: 'valid-global-profile' }, calls = [];
+  const auth = createAzureSqlAuth({
+    platform: 'linux', now: () => clock, authDirectory, env,
+    execFileImpl(executable, args, options, callback) {
+      calls.push({ args, env: options.env });
+      if (options.env.AZURE_CONFIG_DIR === env.AZURE_CONFIG_DIR) callback(null, tokenResponse(), '');
+      else callback(Object.assign(new Error('no session'), { code: 1 }), '', 'Please run az login.');
+    },
+  });
+  await assert.rejects(auth.withSession(cfg({ auth: 'azuread-interactive', user: 'admin@example.test', tenant: tenantA }),
+    () => assert.fail('SQL must not run without app authorization')), /Sign in to the SQLPulse session via Test\/Load/);
+  assert.equal(calls.length, 1);
+  assert.notEqual(calls[0].env.AZURE_CONFIG_DIR, env.AZURE_CONFIG_DIR);
+  assert.equal(calls[0].args[0], 'account');
+  assert.equal(env.AZURE_CONFIG_DIR, 'valid-global-profile');
+  await auth.withSession(cfg({ auth: 'azuread-integrated', user: 'admin@example.test', tenant: tenantA }), session => {
+    assert.equal(session.azureConfigDir, undefined);
+    assert.equal(sqlcmdEnvironment(cfg({ auth: 'azuread-integrated' }), env, session.tenant, session.azureConfigDir).AZURE_CONFIG_DIR,
+      env.AZURE_CONFIG_DIR);
+  }, { allowLogin: true, forceLogin: true });
+  assert.ok(calls.slice(1).every(call => call.env.AZURE_CONFIG_DIR === env.AZURE_CONFIG_DIR && call.args[0] === 'account'));
+});
+
+test('browser/device login and supplementary account verification stay in the isolated profile and fail closed', async t => {
+  const authDirectory = await mkdtemp(path.join(root, '.sql-connection-'));
+  t.after(() => rm(authDirectory, { recursive: true, force: true }));
+  for (const entraFlow of ['browser', 'device-code']) {
+    const calls = [], progress = [];
+    let loggedIn = false;
+    const auth = createAzureSqlAuth({
+      platform: 'linux', now: () => clock, authDirectory, env: { AZURE_CONFIG_DIR: 'external-profile' },
+      execFileImpl(executable, args, options, callback) {
+        calls.push({ args, env: options.env });
+        if (args[0] === 'login') { loggedIn = true; return callback(null, '', ''); }
+        if (args[1] === 'list') return callback(null, '[]', '');
+        if (!loggedIn) return callback(Object.assign(new Error('no session'), { code: 1 }), '', 'Please run az login.');
+        callback(null, tokenResponse({ upn: 'wrong@example.test' }), '');
+      },
+    });
+    await assert.rejects(auth.withSession(cfg({ auth: 'azuread-interactive', entraFlow, user: 'admin@example.test', tenant: tenantA }),
+      () => assert.fail('A wrong post-login identity must never reach SQL'), {
+        allowLogin: true, onProgress: value => progress.push(value),
+      }), /does not match/);
+    assert.equal(calls.filter(call => call.args[0] === 'login').length, 1);
+    assert.ok(calls.some(call => call.args[1] === 'list'));
+    const profile = calls[0].env.AZURE_CONFIG_DIR;
+    assert.ok(profile.startsWith(authDirectory + path.sep));
+    assert.ok(calls.every(call => call.env.AZURE_CONFIG_DIR === profile));
+    assert.equal(calls.find(call => call.args[0] === 'login').args.includes('--use-device-code'), entraFlow === 'device-code');
+    assert.doesNotMatch(JSON.stringify(progress), /accessToken|eyJ|azureConfigDir|wrong@example/);
+  }
+});
+
+test('production SQL execution uses exactly the verified app profile for Azure Database and Managed Instance', async t => {
+  const authDirectory = await mkdtemp(path.join(root, '.sql-connection-'));
+  t.after(() => rm(authDirectory, { recursive: true, force: true }));
+  assert.match(source, /createAzureSqlAuth\(\{\s*authDirectory:\s*path\.join\(DATA_DIR,\s*'azure-sql-auth'\)\s*\}\)/);
+  const cliCalls = [], ambient = {
+    AZURE_CONFIG_DIR: 'outside-app', Azure_Config_Dir: 'outside-app-mixed', SQLCMDUSER: 'untrusted-user',
+    SQLCMDPASSWORD: 'untrusted-password', azure_tenant_id: tenantB,
+  };
+  const auth = createAzureSqlAuth({
+    platform: 'linux', now: () => clock, authDirectory, env: ambient,
+    execFileImpl(executable, args, options, callback) {
+      cliCalls.push({ args, env: options.env });
+      callback(null, args[0] === 'login' ? '' : tokenResponse(), '');
+    },
+  });
+  const fixture = await serverFixture(t, { azureSqlAuth: auth, process: { env: ambient } });
+  for (const connection of [
+    cfg({ auth: 'azuread-interactive', user: 'admin@example.test', tenant: tenantA,
+      connectionType: 'azure-sqldb', server: 'db.database.windows.net', database: 'app', azureConfigDir: 'malicious' }),
+    cfg({ id: 'mi', auth: 'azuread-interactive', user: 'ADMIN@example.test', tenant: tenantA,
+      connectionType: 'azure-mi', server: 'mi.public.zone.database.windows.net,3342', azureConfigDir: 'malicious' }),
+  ]) {
+    for (const tag of ['test', 'engine', 'dblist', 'metrics']) {
+      ambient.AZURE_CONFIG_DIR = 'other-app-account-' + tag;
+      await fixture.runSqlcmdOutput(connection, 'SELECT 1;', tag, [], 100, {
+        allowLogin: tag === 'test', forceLogin: connection.id === 'one' && tag === 'test',
+      });
+    }
+  }
+  const sqlCalls = fixture.calls.filter(call => call.sql);
+  assert.equal(sqlCalls.length, 8);
+  const profile = cliCalls[0].env.AZURE_CONFIG_DIR;
+  assert.ok(cliCalls.every(call => call.env.AZURE_CONFIG_DIR === profile));
+  assert.equal(cliCalls.filter(call => call.args[0] === 'login').length, 1);
+  for (const call of sqlCalls) {
+    assert.ok(call.args.includes('--authentication-method=ActiveDirectoryAzCli'));
+    assert.equal(call.options.env.AZURE_CONFIG_DIR, profile);
+    assert.equal(call.options.env.AZURE_TENANT_ID, tenantA);
+    assert.equal(Object.hasOwn(call.options.env, 'Azure_Config_Dir'), false);
+    assert.equal(Object.keys(call.options.env).some(key => /^SQLCMD|^azure_config_dir$|^azure_tenant_id$/.test(key)), false);
+  }
+  assert.equal(ambient.SQLCMDPASSWORD, 'untrusted-password');
+  assert.equal(ambient.Azure_Config_Dir, 'outside-app-mixed');
+  const registered = await fixture.request('/api/servers', 'POST', cfg({ auth: 'azuread-interactive',
+    user: 'admin@example.test', tenant: tenantA, server: 'mi.zone.database.windows.net', connectionType: 'azure-mi' }));
+  assert.equal(registered.status, 200);
+  const visible = JSON.stringify([registered.data, (await fixture.request('/api/servers', 'GET')).data]);
+  const stored = await readFile(path.join(fixture.directory, 'servers.json'), 'utf8');
+  for (const value of [visible, stored]) assert.doesNotMatch(value, /azureConfigDir|accessToken|refreshToken|eyJ/);
 });
 
 test('SQL cancellation waits for process exit, leaves registry unchanged and supports progress/cancel routes', async t => {

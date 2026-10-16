@@ -28,6 +28,7 @@ history-series/
 incidents/
 diagnostics/
 ai-copilot-home/
+azure-sql-auth/
 dist/
 .reliability-*/
 tests/.api-test-*/

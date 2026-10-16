@@ -35,7 +35,7 @@ Remove-Item "$env:USERPROFILE\Desktop\SQL Dashboard.lnk" -Force -ErrorAction Sil
 Write-Host "  Removed shortcuts"
 
 # Preserve config? Ask user
-$configFiles = @('servers.json', 'ai-settings.json', 'alert-settings.json', 'alert-state.json', 'microsoft-email-auth.json', '.encryption-key',
+$configFiles = @('servers.json', 'ai-settings.json', 'alert-settings.json', 'alert-state.json', 'microsoft-email-auth.json', '.encryption-key', 'azure-sql-auth',
     'monitor-settings.json', 'incident-evidence.json', 'operational-reports.json', 'history', 'history-series', '.sql-pulse-owner.json')
 if (@($configFiles | Where-Object { Test-Path (Join-Path $InstallDir $_) }).Count -gt 0) {
     $ans = Read-Host "Keep server and AI provider configuration? [Y/n]"

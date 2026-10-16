@@ -651,7 +651,7 @@ tr.clickable:hover td:first-child{border-left:3px solid var(--cp-accent);padding
       <select id="f-auth">
         <option value="windows">Windows Integrated (SSPI)</option>
         <option value="sqlauth">SQL Server Authentication</option>
-        <option value="azuread-integrated">Entra ID - existing Azure CLI session</option>
+        <option value="azuread-integrated">Entra ID - existing shared Azure CLI session</option>
         <option value="azuread-password">Entra ID Password</option>
         <option value="azuread-interactive">Microsoft browser sign-in (recommended)</option>
         <option value="azuread-device-code">Microsoft device code (alternative)</option>
@@ -663,7 +663,7 @@ tr.clickable:hover td:first-child{border-left:3px solid var(--cp-accent);padding
       <div class="hint" id="f-user-hint">Account used to connect to SQL.</div>
       <div id="f-force-login-field" hidden>
         <label style="margin-top:8px;"><input type="checkbox" id="f-force-login" style="width:auto;"> Sign in again on the next Test or Load</label>
-        <div class="hint">Refresh Microsoft sign-in instead of reusing the verified Azure CLI session. Does not change SQL permissions.</div>
+        <div class="hint">Refresh this SQLPulse account/tenant session for both Azure SQL Database and Managed Instance. Does not change SQL permissions.</div>
       </div>
     </div>
     <div class="field" id="f-pw-field" style="display:none;">
@@ -1583,9 +1583,9 @@ function updateAuthFields(){
   el('f-user-label').textContent = a.startsWith('azuread') ? 'Entra ID user (user@domain.com)' : 'SQL login';
   el('f-tenant-field').style.display = a.startsWith('azuread') ? 'block' : 'none';
   el('f-user-hint').textContent = a === 'azuread-interactive'
-    ? 'Uses your verified Microsoft session when available; otherwise opens browser sign-in. Select Sign in again to refresh it.'
-    : a === 'azuread-device-code' ? 'A copyable code appears in this window. Use this if browser sign-in is unavailable.'
-    : a === 'azuread-integrated' ? 'Uses a verified Azure CLI session; it does not use Windows SSPI.'
+    ? 'SQLPulse saves an isolated account/tenant session, shared by Azure SQL Database and Managed Instance connectivity. Other apps cannot change it. First use: sign in through Test/Load.'
+    : a === 'azuread-device-code' ? 'SQLPulse saves the same isolated account/tenant credentials for Azure SQL Database and Managed Instance. First use: Test/Load shows a copyable Microsoft sign-in code.'
+    : a === 'azuread-integrated' ? 'Uses the existing shared Azure CLI session (including AZURE_CONFIG_DIR); other apps can change it. Choose browser/device sign-in for isolation. Not Windows SSPI.'
     : a === 'azuread-password' ? 'Password authentication cannot satisfy MFA.' : 'Account used to connect to SQL.';
 }
 function looksAzureSqlDbHost(server){

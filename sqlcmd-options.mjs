@@ -66,11 +66,15 @@ export function buildSqlcmdArgs(cfg, extraArgs = []) {
   return args.concat(extraArgs);
 }
 
-export function sqlcmdEnvironment(cfg, base = process.env, tenant = cfg.tenant) {
+export function sqlcmdEnvironment(cfg, base = process.env, tenant = cfg.tenant, azureConfigDir) {
   const env = { ...base };
   // Ambient sqlcmd credentials/settings must not override a saved connection.
   for (const key of Object.keys(env)) if (/^SQLCMD/i.test(key)) delete env[key];
   for (const key of Object.keys(env)) if (/^AZURE_TENANT_ID$/i.test(key)) delete env[key];
+  if (azureConfigDir !== undefined) {
+    for (const key of Object.keys(env)) if (/^AZURE_CONFIG_DIR$/i.test(key)) delete env[key];
+    env.AZURE_CONFIG_DIR = azureConfigDir;
+  }
   if (tenant) env.AZURE_TENANT_ID = normalizeTenant(tenant);
   if (cfg.auth === 'sqlauth' || cfg.auth === 'azuread-password') env.SQLCMDPASSWORD = cfg.password || '';
   return env;

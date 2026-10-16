@@ -52,7 +52,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 [options]
 | **Node.js + npm** | Runs the dashboard, Copilot SDK and MSAL; supported range is `^20.19.0 \|\| >=22.12.0`; missing/unsupported versions are repaired with current LTS | `OpenJS.NodeJS.LTS` |
 | **go-sqlcmd 1.10+** | SQL connections for all authentication methods; ODBC is not required | `Microsoft.Sqlcmd` |
 | **GitHub CLI (`gh`)** | GitHub Copilot browser login; checked by default, omitted with `-Minimal` | `GitHub.cli` |
-| **Azure CLI (`az`)** | Entra SQL authentication using an existing Azure CLI session; checked by default, omitted with `-Minimal` | `Microsoft.AzureCLI` |
+| **Azure CLI (`az`)** | Entra SQL authentication using app-owned browser/device sessions or the explicit shared-session mode; checked by default, omitted with `-Minimal` | `Microsoft.AzureCLI` |
 
 Requires Windows PowerShell **5.1+** on Windows 10/11 with Windows Package Manager available. If every required tool is already usable, no package installation is attempted. Executable version probes reject old Node and old/ODBC sqlcmd. Selected absolute paths are saved in `.sql-pulse-tools.json`; the launcher and runtime revalidate them instead of trusting filenames or an older machine-first PATH. Standard, custom PATH, and WinGet locations are searched if a saved executable moves. The installer uses the selected Node's `npm.cmd` immediately, without reopening the terminal or requiring an npm PowerShell execution-policy exception.
 
@@ -66,7 +66,7 @@ Dependencies are installed from the bundled **`package-lock.json`** with `npm ci
 
 The installer checks both port 8765 ownership and the exact installed Node entry point, including a process that is still starting. A running dashboard, active SQL/authentication child process, or an unrelated listener blocks installation **before any application files are replaced**. It does not kill processes or attempt an automatic restart. Finish/cancel operations, use the installed `Stop-Dashboard.ps1` when idle, and rerun. The newly installed stop command also checks ownership and refuses to terminate a dashboard with active children; it never stops an unrelated port owner.
 
-Upgrades preserve `servers.json`, AI/email settings, Microsoft token metadata/cache, `.encryption-key`, and the `history` folder. These are copied **together** into a timestamped `config-backups` subfolder before replacement; existing backups are retained. Keep backups private: they contain encrypted credentials and the account-bound key. The installer rejects payloads containing runtime state, keys, history or preinstalled `node_modules`, so a release cannot overwrite your configuration with the packager's files. A failed staged dependency install leaves the previous application files untouched. Replacement keeps the previous application files and dependency directory until every staged move succeeds. A commit failure restores them; if Windows prevents restoration, the error identifies the retained `.install-rollback-*` recovery folder. Never delete that folder before recovering its files.
+Upgrades preserve `servers.json`, AI/email settings, Microsoft token metadata/cache, `.encryption-key`, the app-owned `azure-sql-auth` profile folder, and the `history` folder. These are copied **together** into a timestamped `config-backups` subfolder before replacement; existing backups are retained. Keep backups private: they contain encrypted credentials and the account-bound key. The installer rejects payloads containing runtime state, keys, history or preinstalled `node_modules`, so a release cannot overwrite your configuration with the packager's files. A failed staged dependency install leaves the previous application files untouched. Replacement keeps the previous application files and dependency directory until every staged move succeeds. A commit failure restores them; if Windows prevents restoration, the error identifies the retained `.install-rollback-*` recovery folder. Never delete that folder before recovering its files.
 
 ### Optional Windows service (explicit opt-in)
 
@@ -104,12 +104,14 @@ This verifies the registered executable/account, disables service startup, grace
 3. Click **+ Add server** to register more:
    - **Windows Integrated** for on-prem SQL Server on the same domain
    - **SQL Server Authentication** for user/password logins
-   - **Entra ID - existing Azure CLI session** for a verified cached CLI identity, not Windows SSPI
+   - **Entra ID - existing shared Azure CLI session** for the legacy shared/global CLI identity (other apps can change it), not Windows SSPI
    - **Entra ID Password** for headless Azure automation
    - **Microsoft browser sign-in (recommended)** for normal Microsoft sign-in without entering a device code
    - **Microsoft device code (alternative)** with a Copy code button and a visible sign-in link
 
 The connection editor distinguishes Azure SQL Database from Managed Instance. Managed Instance does not require a user database; leave the field blank for the login default or type a name directly. Specify the SQL resource tenant for cross-tenant Entra access. Interactive Test/Load verifies the requested account and may launch MFA; background collection never launches sign-in. A connection failure shows the actual diagnostic rather than the raw process command.
+
+Browser/device sign-in persists a SQLPulse-owned Azure CLI profile per normalized account and tenant under `DATA_DIR\azure-sql-auth\<SHA256>`. **The same profile is used for login, token/account verification and actual sqlcmd connectivity to both Azure SQL Database and Managed Instance**, including probes and monitoring. It survives shutdown, upgrades and keep-configuration uninstall backups. Other apps' CLI sign-ins cannot switch this identity. First use requires explicit Test/Load sign-in inside SQLPulse: an existing global CLI login is not imported, copied or used as a fallback. Background token refresh is possible only while Microsoft policy, token lifetime and MFA/Conditional Access permit; use Test/Load again when authorization expires. No Microsoft password is saved. AI/GitHub authentication is unchanged.
 
 Azure SQL/Managed Instance built-in reads allow 30 seconds for SQL login and one fresh-connection retry after five seconds for recognized transient network/service failures. Authentication, permission and certificate failures, command timeouts, SQL actions and custom counters are not automatically replayed. Retrying cannot repair a missing VPN/private route, expired interactive authorization or incorrect SQL permissions. Use the saved connection diagnostic to distinguish these from a SQL service outage.
 
@@ -125,9 +127,9 @@ Interactive authentication no longer relies on a Windows account picker behind t
 - `incident-evidence.json` — explicitly opted-in local incident evidence/settings; SQL text and plans require separate choices
 - `operational-reports.json` — local numeric operational summaries and explicitly enabled UTC schedule; retained with configuration backups
 - `microsoft-email-auth.json` — app registration/account metadata and encrypted MSAL email token cache
+- `azure-sql-auth/` — persistent isolated Azure CLI SQL account/tenant profiles; Azure CLI owns its protected token-cache format. Protect this folder and its backups with Windows account filesystem permissions; never package or share them.
 - `.encryption-key` — AES-256 key **wrapped with Windows DPAPI (CurrentUser)**
-- These files live in the install folder; encrypted credentials and tokens are bound to your Windows account
-- Copying them to another machine / user won't decrypt
+- Runtime data defaults to the install folder; a configured data directory takes precedence. App-encrypted credentials and email tokens are bound to your Windows account; copying them to another machine/user won't decrypt. Azure CLI profile files have their own CLI-managed protection and authorization lifetime.
 - Numeric history, incident evidence and registry metadata are not encrypted. Retention applies to active history/evidence, not retained legacy migration files or installer backups; manage those backups separately.
 
 ## Uninstall
@@ -138,7 +140,7 @@ Node.js, go-sqlcmd, GitHub CLI and Azure CLI are left in place — remove them v
 
 ## AI setup
 
-Open **Settings → Configure AI provider** to configure GitHub Copilot, OpenRouter, Azure AI Foundry / Azure OpenAI, OpenAI, Anthropic, local OpenAI-compatible models, or native Ollama (default). Provider settings and credentials survive upgrades and provider switching. GitHub CLI (`gh`) and Azure CLI (`az`, for existing-session Entra SQL authentication) are installed/verified by default; `-Minimal` omits them. Installing a CLI is not authentication: sign in only when you choose that feature. Ollama/models, provider subscriptions, endpoints and API keys are configured separately and are not downloaded or purchased by this installer.
+Open **Settings → Configure AI provider** to configure GitHub Copilot, OpenRouter, Azure AI Foundry / Azure OpenAI, OpenAI, Anthropic, local OpenAI-compatible models, or native Ollama (default). Provider settings and credentials survive upgrades and provider switching. GitHub CLI (`gh`) and Azure CLI (`az`, for Entra SQL authentication) are installed/verified by default; `-Minimal` omits them. Installing a CLI is not authentication: sign in only when you choose that feature. Ollama/models, provider subscriptions, endpoints and API keys are configured separately and are not downloaded or purchased by this installer.
 
 Provider testing sends a generic health-check prompt only. Typing a question automatically prepares a local inline review with destination, privacy warning and expandable exact payload. **Send question** approves that displayed payload without a second confirmation pop-up; cloud and network providers send only the approved SQL context off the machine. See the complete user guide in `docs/README.md` in the release ZIP, or the root README when using source, for endpoint and credential details.
 

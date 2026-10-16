@@ -30,7 +30,7 @@ test('release ZIP contains only installer, whitelisted runtime assets and existi
   const whitelist = [...builder.match(/\$payloadNames = @\(([\s\S]*?)\r?\n\)/)[1].matchAll(/'([^']+)'/g)].map(match => match[1]);
   assert.equal(entries.filter(entry => entry.includes('/payload/')).length, whitelist.length);
   for (const name of whitelist) assert.ok(entries.includes(prefix + 'payload/' + name), name);
-  for (const entry of entries) assert.doesNotMatch(entry, /(?:^|\/)(?:node_modules|\.git|tmp|history|history-series|incidents|diagnostics|servers\.json|ai-settings\.json|alert-settings\.json|alert-state\.json|microsoft-email-auth\.json|monitor-settings\.json|incident-settings\.json|incident-evidence\.json|\.sql-pulse-tools\.json|\.sql-pulse-service\.json|\.encryption-key)(?:\/|$)/);
+  for (const entry of entries) assert.doesNotMatch(entry, /(?:^|\/)(?:azure-sql-auth|node_modules|\.git|tmp|history|history-series|incidents|diagnostics|servers\.json|ai-settings\.json|alert-settings\.json|alert-state\.json|microsoft-email-auth\.json|monitor-settings\.json|incident-settings\.json|incident-evidence\.json|\.sql-pulse-tools\.json|\.sql-pulse-service\.json|\.encryption-key)(?:\/|$)/);
   assert.match(await readFile(archive + '.sha256', 'utf8'), /^[a-f0-9]{64}  SQL-Pulse-/);
   await assert.rejects(run('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-OutputDirectory', output], { windowsHide: true }), /already exists/);
 });

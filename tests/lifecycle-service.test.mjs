@@ -275,9 +275,9 @@ test('uninstall keep-config groups new monitoring and evidence state with key wi
   try {
     ps(`
 $InstallDir=Join-Path ${quote(fixture)} 'installed';$env:USERPROFILE=${quote(fixture)}
-$null=New-Item -ItemType Directory -Path $InstallDir,(Join-Path $InstallDir 'history'),(Join-Path $InstallDir 'history-series') -Force
+$null=New-Item -ItemType Directory -Path $InstallDir,(Join-Path $InstallDir 'history'),(Join-Path $InstallDir 'history-series'),(Join-Path $InstallDir 'azure-sql-auth\\fixture-profile') -Force
 foreach($name in @('servers.json','ai-settings.json','alert-settings.json','alert-state.json','microsoft-email-auth.json','.encryption-key',
- 'monitor-settings.json','incident-evidence.json','history\\one.json','history-series\\.settings.json','history-series\\one.json')) {
+ 'monitor-settings.json','incident-evidence.json','history\\one.json','history-series\\.settings.json','history-series\\one.json','azure-sql-auth\\fixture-profile\\fixture-cache.bin')) {
  Set-Content -LiteralPath (Join-Path $InstallDir $name) "private $name"
 }
 function Read-Host {'Y'}
@@ -289,7 +289,7 @@ $block=[scriptblock]::Create($assignment.Extent.Text+"\`n"+$keep.Extent.Text)
 . $block
 $root=Join-Path $env:USERPROFILE 'SqlDashboard-config-backup';$first=@(Get-ChildItem -LiteralPath $root -Directory)
 Assert ($first.Count -eq 1) 'Expected one grouped backup'
-foreach($name in @('servers.json','microsoft-email-auth.json','.encryption-key','monitor-settings.json','incident-evidence.json','history\\one.json','history-series\\.settings.json','history-series\\one.json')) {
+foreach($name in @('servers.json','microsoft-email-auth.json','.encryption-key','monitor-settings.json','incident-evidence.json','history\\one.json','history-series\\.settings.json','history-series\\one.json','azure-sql-auth\\fixture-profile\\fixture-cache.bin')) {
  Assert ((Get-Content -LiteralPath (Join-Path $first[0].FullName $name) -Raw).Trim() -eq "private $name") "Backup missing or changed $name"
 }
 Set-Content -LiteralPath (Join-Path $InstallDir '.encryption-key') 'second key'
